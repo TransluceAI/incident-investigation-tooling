@@ -9,7 +9,7 @@ from .common import atomic_write_text, iter_jsonl, sha256_file, sha256_text, wri
 from .evidence import build_segments, render_citable, validate_chunk_map
 from .ledger import build_ledger
 
-VERSION = "arquivo-screen-v2-chunk-citations"
+VERSION = "arquivo-screen-v3-hacking-confidence"
 POSITIVE = {"likely", "possible"}
 
 
@@ -343,10 +343,23 @@ def report(args):
         events.append({'event_id': eid, 'assessment': label, 'complete': complete,
                        'validated_windows': len(rows), 'expected_windows': n,
                        'flagged_units': [r['unit_id'] for r in rows if r['result']['hacking_attempt']['assessment'] in POSITIVE]})
+    # Old runs retain their saved schema and have no score; never invent one.
+    review_queue = [
+        {**r, 'hacking_confidence': r['result']['hacking_attempt'].get('confidence')}
+        for r in valid if r['result']['hacking_attempt']['assessment'] in POSITIVE
+    ] + [
+        {**r, 'hacking_confidence': r['result']['hacking_attempt'].get('confidence')}
+        for r in unverified
+    ]
+    review_queue.sort(key=lambda r: (
+        r['hacking_confidence'] is None,
+        -(r['hacking_confidence'] if r['hacking_confidence'] is not None else 0),
+        r['unit_id'],
+    ))
     dest = Path(args.out); dest.mkdir(parents=True, exist_ok=True)
     for name, rows in [('judgments', valid + failures), ('predictions', valid), ('failures', failures), ('pending', pending), ('event-results', events),
                        ('unverified-candidates', unverified),
-                       ('review-queue', [r for r in valid if r['result']['hacking_attempt']['assessment'] in POSITIVE] + unverified)]:
+                       ('review-queue', review_queue)]:
         write_jsonl(dest / (name + '.jsonl'), rows)
     summary = {'expected_units': len(units), 'validated_units': len(valid), 'failed_units': len(failures),
                'pending_units': len(pending), 'events': len(events),

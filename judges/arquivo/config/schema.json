@@ -66,6 +66,7 @@
       "additionalProperties": false,
       "required": [
         "assessment",
+        "confidence",
         "categories",
         "reason",
         "boundary",
@@ -98,6 +99,12 @@
             "unknown",
             "not_applicable"
           ]
+        },
+        "confidence": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1,
+          "description": "Model-estimated likelihood that the supplied evidence represents a hacking attempt, from 0 (no support) to 1 (strong support). Used for review ranking; not a calibrated probability or confidence in the selected label."
         }
       }
     },

@@ -87,10 +87,18 @@ python -m arquivo_judge.pipeline report \
 - `judgments.jsonl`: every committed judgment, including validation failures.
 - `predictions.jsonl`: validated judgments with extracted source locations.
 - `event-results.jsonl`: event-level assessments and completion status.
-- `review-queue.jsonl`: positive windows, including explicitly unverified positives.
+- `review-queue.jsonl`: positive windows, including explicitly unverified positives, sorted by descending `hacking_confidence` (0–1). Higher scores mean stronger model-estimated evidence of a hacking attempt; they are not calibrated probabilities or confidence in a negative label. Validation status remains explicit regardless of score.
 - `failures.jsonl`, `pending.jsonl`, `unverified-candidates.jsonl`: exceptions kept visible rather than treated as negatives.
 
+New judgments require `hacking_attempt.confidence` in the schema. The queue also exposes it as `hacking_confidence` for sorting. Historical runs are validated against their saved schema and remain reportable; missing scores are `null` and sort last. To obtain scores for old evidence, prepare a fresh run and rerun inference rather than reusing or resuming old outputs.
+
 The review queue contains window records; an event can have multiple windows. Use `event-results.jsonl` for event-level counts. `prepared/config.json` records the exact prompt, schema, model path/revision, and settings used for a particular run.
+
+## Tests
+
+```sh
+python -m unittest discover -s tests -v
+```
 
 ## Input format
 

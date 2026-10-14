@@ -15,7 +15,9 @@ Slurm job 66 screened the entire preserved corpus supplied to the judge on eight
 
 The 23 exceptions comprise 17 unknown evidence chunks, five unsupported success stage/system combinations, and one unresolved action reference. They remain reviewable and are not accepted as negative findings. Labels do not establish successful attacks or AI involvement, and classification accuracy is not calibrated.
 
-The run used `Qwen/Qwen3.8-27B-FP8`, revision `017b9c7af6b5689d5dd426a76e0bc077eb5ca20a`, temperature 0, seed 17, and thinking disabled. The recorded environment used vLLM 0.31.0, Transformers 5.17.0, PyTorch 2.13.0, and jsonschema 4.26.0. The package's optional dependencies are not pinned; these are the versions used for the recorded run. The rubric, schema, and shared inference runner included here are taken from that run. The corpus preparation default path and Slurm launcher have been adapted for portability; no new GPU run is claimed for this packaging.
+The run used `Qwen/Qwen3.8-27B-FP8`, revision `017b9c7af6b5689d5dd426a76e0bc077eb5ca20a`, temperature 0, seed 17, and thinking disabled. The recorded environment used vLLM 0.31.0, Transformers 5.17.0, PyTorch 2.13.0, and jsonschema 4.26.0. The package's optional dependencies are not pinned; these are the versions used for the recorded run. The shared inference runner is taken from that run; the rubric and schema now also request a confidence score as described below. The corpus preparation default path and Slurm launcher have been adapted for portability; no new GPU run is claimed for this packaging.
+
+The recorded run predates the confidence-score addition. Its saved rubric/schema and outputs have no confidence scores; the totals above are unchanged. New runs use the updated rubric/schema to produce scores. Re-reporting this historical run leaves scores `null`; it does not backfill model estimates.
 
 ## Artifact access
 
