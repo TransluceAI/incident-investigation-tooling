@@ -1,0 +1,2 @@
+{"observation_id": "synthetic-index", "kind": "arquivo_index", "document_path": "documents/index.jsonl", "text_sha256": "4f4dbb320bd76495ad36f03b1d40292ec05b2e399e2b9e6a737cf9c46eb5c96e"}
+{"observation_id": "synthetic-capture", "kind": "arquivo_capture", "document_path": "documents/population.csv", "metadata": {"original_url": "https://stats.example/population.csv", "capture_timestamp": "20260601000100"}, "text_sha256": "681b651f0d77de5942349475a9add74932a04cf6ef1803f6591de998c3c11200"}

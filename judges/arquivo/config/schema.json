@@ -1,0 +1,242 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "hacking_attempt",
+    "agentic_activity",
+    "coordination",
+    "attribution",
+    "action_evidence",
+    "evidence",
+    "missing_evidence"
+  ],
+  "$defs": {
+    "assessment": {
+      "type": "string",
+      "enum": [
+        "likely",
+        "possible",
+        "no_evidence",
+        "insufficient_evidence"
+      ]
+    },
+    "category": {
+      "type": "string",
+      "enum": [
+        "sql_injection",
+        "xss",
+        "command_or_template_injection",
+        "path_traversal_or_lfi",
+        "source_or_config_disclosure_probe",
+        "auth_or_authz_bypass",
+        "credential_abuse",
+        "bot_or_access_control_circumvention",
+        "ssrf",
+        "flooding_or_dos",
+        "other"
+      ]
+    },
+    "citation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "segment_id",
+        "chunk_id",
+        "location"
+      ],
+      "properties": {
+        "segment_id": {
+          "type": "string"
+        },
+        "location": {
+          "type": "string",
+          "maxLength": 200
+        },
+        "chunk_id": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    }
+  },
+  "properties": {
+    "hacking_attempt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "assessment",
+        "categories",
+        "reason",
+        "boundary",
+        "authorization"
+      ],
+      "properties": {
+        "assessment": {
+          "$ref": "#/$defs/assessment"
+        },
+        "categories": {
+          "type": "array",
+          "maxItems": 4,
+          "items": {
+            "$ref": "#/$defs/category"
+          }
+        },
+        "reason": {
+          "type": "string",
+          "maxLength": 600
+        },
+        "boundary": {
+          "type": "string",
+          "maxLength": 300
+        },
+        "authorization": {
+          "type": "string",
+          "enum": [
+            "appears_authorized",
+            "appears_unauthorized",
+            "unknown",
+            "not_applicable"
+          ]
+        }
+      }
+    },
+    "agentic_activity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "assessment",
+        "reason"
+      ],
+      "properties": {
+        "assessment": {
+          "$ref": "#/$defs/assessment"
+        },
+        "reason": {
+          "type": "string",
+          "maxLength": 600
+        }
+      }
+    },
+    "coordination": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "assessment",
+        "reason"
+      ],
+      "properties": {
+        "assessment": {
+          "$ref": "#/$defs/assessment"
+        },
+        "reason": {
+          "type": "string",
+          "maxLength": 600
+        }
+      }
+    },
+    "attribution": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "claimed_actor",
+        "provider_attribution",
+        "basis"
+      ],
+      "properties": {
+        "claimed_actor": {
+          "type": "string",
+          "maxLength": 200
+        },
+        "provider_attribution": {
+          "type": "string",
+          "enum": [
+            "not_established",
+            "supported_by_supplied_evidence"
+          ]
+        },
+        "basis": {
+          "type": "string",
+          "maxLength": 400
+        }
+      }
+    },
+    "action_evidence": {
+      "type": "array",
+      "maxItems": 6,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "target",
+          "action",
+          "observed_stage",
+          "responding_system",
+          "outcome",
+          "evidence_ids"
+        ],
+        "properties": {
+          "target": {
+            "type": "string",
+            "maxLength": 300
+          },
+          "action": {
+            "type": "string",
+            "maxLength": 300
+          },
+          "observed_stage": {
+            "type": "string",
+            "enum": [
+              "discussion_or_planning",
+              "published_payload",
+              "recorded_request",
+              "observed_response",
+              "demonstrated_outcome",
+              "unknown"
+            ]
+          },
+          "responding_system": {
+            "type": "string",
+            "enum": [
+              "archive_replay",
+              "intermediary_service",
+              "ultimate_target",
+              "unknown"
+            ]
+          },
+          "outcome": {
+            "type": "string",
+            "enum": [
+              "unknown",
+              "blocked_or_failed_for_observed_attempt",
+              "supported_success",
+              "not_applicable"
+            ]
+          },
+          "evidence_ids": {
+            "type": "array",
+            "maxItems": 6,
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      }
+    },
+    "evidence": {
+      "type": "array",
+      "maxItems": 9,
+      "items": {
+        "$ref": "#/$defs/citation"
+      }
+    },
+    "missing_evidence": {
+      "type": "array",
+      "maxItems": 4,
+      "items": {
+        "type": "string",
+        "maxLength": 300
+      }
+    }
+  }
+}
