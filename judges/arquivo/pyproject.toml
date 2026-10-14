@@ -1,0 +1,20 @@
+[project]
+name = "arquivo-judge"
+version = "0.1.0"
+description = "Source-cited screening of preserved Arquivo.pt evidence"
+requires-python = ">=3.10"
+dependencies = ["jsonschema>=4.0"]
+
+[project.optional-dependencies]
+prepare = ["transformers"]
+gpu = ["transformers", "vllm"]
+
+[project.scripts]
+arquivo-judge = "arquivo_judge.pipeline:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]

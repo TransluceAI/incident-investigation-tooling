@@ -11,7 +11,7 @@ Each tool lives in its own subdirectory with its own README.
 
 ## Tool Index
 
-No tools yet. See [CONTRIBUTING.md](CONTRIBUTING.md) to add one.
+- [Arquivo judge](judges/arquivo/): Screens preserved Arquivo.pt evidence for hacking attempts, with independent AI-agent and coordination assessments and source-cited review queues.
 
 ## Contributing
 
