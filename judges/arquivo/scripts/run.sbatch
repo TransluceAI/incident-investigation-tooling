@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # Run the full corpus: one token-balanced shard per GPU worker.
+# The array matches shard_all.py's default eight shards; pass a matching --array to sbatch otherwise.
 #SBATCH --array=0-7
 #SBATCH --ntasks=1
 #SBATCH --gpus-per-task=1
