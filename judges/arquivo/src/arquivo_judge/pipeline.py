@@ -9,14 +9,9 @@ from .common import atomic_write_text, iter_jsonl, sha256_bytes, sha256_file, sh
 from .evidence import build_segments, render_citable, validate_chunk_map
 from .ledger import build_ledger
 
-VERSION = "arquivo-screen-v4"
+VERSION = "arquivo-screen-v3-hacking-confidence"
 POSITIVE = {"likely", "possible"}
-AXES = ("hacking_attempt", "agentic_activity", "coordination")
-SUPPORTED = "supported_by_supplied_evidence"
-ALL_AXES = AXES + ("provider_attribution",)
 DEFAULT_BUDGET = 160000
-# Widest PART marker, so a window measured with it never grows once numbered.
-PART_PLACEHOLDER = (999999, 999999)
 
 
 def read_source(root, rel):
@@ -30,65 +25,46 @@ def save_json(path, value):
     atomic_write_text(path, json.dumps(value, ensure_ascii=False, indent=2) + "\n")
 
 
-def _slices(s, fixed, count, budget, overlap):
-    """Character ranges of one segment, each fitting beside the fixed segments."""
-    start = 0
-    while True:
-        remaining = len(s['text']) - start
-        # A conservative character proposal avoids repeatedly tokenizing a
-        # multi-megabyte suffix just to maximize each window's occupancy.
-        lo = min(remaining, budget * 2)
-        while True:
-            part = {**s, 'text': s['text'][start:start + lo], 'part': PART_PLACEHOLDER}
-            if count(render_citable(fixed + [part])[0]) <= budget:
-                break
-            if lo == 0:
-                raise ValueError('Metadata alone exceeds window budget')
-            lo = int(lo * 0.8)
-        if not lo and remaining:
-            raise ValueError('No window fits; refusing to omit evidence')
-        end = start + lo
-        yield start, end
-        if end == len(s['text']):
-            return
-        start = end - min(overlap, lo // 4)
-
-
 def windows(segments, count, budget=DEFAULT_BUDGET, overlap=2000):
     """Every character of every segment is supplied; large segments keep source offsets.
 
-    When an event needs several windows, every non-BODY segment (metadata, URL,
-    decoded views, redirects) repeats in each window and only BODY text is sliced,
-    so request-side evidence and the response are judged together. If those
-    segments would take more than a third of the budget, only EVENT and URL repeat
-    and each other segment is sliced on its own. A sliced segment's marker says
-    PART i OF n. Sizes are measured using the complete actual chat template.
+    Small metadata/URL segments repeat in all windows. Large segments are sliced by
+    character boundaries and measured using the complete actual chat template.
     """
     full = render_citable(segments)[0]
     if count(full) <= budget:
-        return [(segments, {s['segment_id']: [0, len(s['text'])] for s in segments})]
-    context = [s for s in segments if s['kind'] != 'BODY']
-    if count(render_citable(context)[0]) < budget // 3:
-        fixed = context
-    else:
-        fixed = []
-        for s in segments:
-            if s['kind'] in {'EVENT', 'URL'} and count(render_citable(fixed + [s])[0]) < budget // 3:
-                fixed.append(s)
-    fixed_ids = {s['segment_id'] for s in fixed}
-    out = []
+        yield segments, {s['segment_id']: [0, len(s['text'])] for s in segments}
+        return
+    fixed, variable = [], []
     for s in segments:
-        if s['segment_id'] in fixed_ids:
-            continue
-        slices = list(_slices(s, fixed, count, budget, overlap))
-        for i, (start, end) in enumerate(slices, 1):
-            part = {**s, 'text': s['text'][start:end]}
-            if len(slices) > 1:
-                part['part'] = (i, len(slices))
+        if s['kind'] in {'EVENT', 'URL'} and count(render_citable(fixed + [s])[0]) < budget // 3:
+            fixed.append(s)
+        else:
+            variable.append(s)
+    for s in variable:
+        start = 0
+        while start < len(s['text']) or (start == 0 and not s['text']):
+            remaining = len(s['text']) - start
+            # A conservative character proposal avoids repeatedly tokenizing a
+            # multi-megabyte suffix just to maximize each window's occupancy.
+            lo = min(remaining, budget * 2)
+            while True:
+                part = {**s, 'text': s['text'][start:start + lo]}
+                if count(render_citable(fixed + [part])[0]) <= budget:
+                    break
+                if lo == 0:
+                    raise ValueError('Metadata alone exceeds window budget')
+                lo = int(lo * 0.8)
+            if not lo and remaining:
+                raise ValueError('No window fits; refusing to omit evidence')
+            end = start + lo
+            parts = fixed + [{**s, 'text': s['text'][start:end]}]
             spans = {x['segment_id']: [0, len(x['text'])] for x in fixed}
             spans[s['segment_id']] = [start, end]
-            out.append((fixed + [part], spans))
-    return out
+            yield parts, spans
+            if end == len(s['text']):
+                break
+            start = end - min(overlap, lo // 4)
 
 
 def make_units(event_id, segments, count, budget=DEFAULT_BUDGET):
@@ -208,8 +184,8 @@ def prepare(args):
     cfg = json.loads(Path(args.engine).read_text())
     cfg['schema'] = json.loads(Path(args.schema).read_text())
     cfg['system_prompt'] = Path(args.rubric).read_text()
-    cfg.setdefault('host_batch_records', 32)
-    cfg.setdefault('host_batch_tokens', 400000)
+    cfg['host_batch_records'] = 32
+    cfg['host_batch_tokens'] = 400000
     # A window must leave room for the answer and fit one runner batch.
     limit = min(cfg['engine']['max_model_len'] - cfg['sampling']['max_tokens'], cfg['host_batch_tokens'])
     cfg['window_budget'] = min(cfg.get('window_budget', DEFAULT_BUDGET), limit)
@@ -309,22 +285,6 @@ def prepare(args):
     print(json.dumps(summary, indent=2), flush=True)
 
 
-def positive_axes(result):
-    """Axes this judgment claims: likely/possible assessments and supported attribution."""
-    axes = [a for a in AXES if result[a]['assessment'] in POSITIVE]
-    if result['attribution']['provider_attribution'] == SUPPORTED:
-        axes.append('provider_attribution')
-    return axes
-
-
-def event_label(assessments, complete):
-    """Any positive window decides; a negative needs every window of the event."""
-    label = next((x for x in ['likely', 'possible'] if x in assessments), None)
-    if label is None:
-        label = 'incomplete' if not complete else ('insufficient_evidence' if 'insufficient_evidence' in assessments else 'no_evidence')
-    return label
-
-
 def runner_identity(data):
     """The inference runner's run identity, recomputed from its recorded inputs."""
     return sha256_bytes(json.dumps(data, sort_keys=True).encode())
@@ -394,11 +354,8 @@ def validate_result(row, unit, schema):
                         'source_start': unit['source_offsets'][sid][0] + pos, 'length': len(value),
                         'quote': value, 'verification': 'exact_legacy_quote'})
         cited.add(sid)
-    if positive_axes(result) and not cited:
+    if any(result[a]['assessment'] in POSITIVE for a in ('hacking_attempt', 'agentic_activity', 'coordination')) and not cited:
         raise ValueError('Positive assessment without evidence')
-    attribution = result['attribution']
-    if attribution['provider_attribution'] == SUPPORTED and not attribution['basis'].strip():
-        raise ValueError('Supported provider attribution without a basis')
     # Located citations do not require maintaining a duplicate global quote list:
     # an action's segment ID is itself a source pointer. Legacy quotes keep their
     # original cross-reference rule when old runs are re-reported.
@@ -424,8 +381,6 @@ def report(args):
     outputs = load_outputs(args.outputs, cfg)
     if set(outputs) - set(units) - set(labels):
         raise ValueError('Outputs contain unexpected units')
-    from jsonschema import Draft202012Validator
-    schema_validator = Draft202012Validator(cfg['schema'])
     valid, failures, pending, checks, unverified = [], [], [], [], []
     for uid, u in units.items():
         if uid not in outputs:
@@ -440,28 +395,22 @@ def report(args):
         except Exception as exc:
             failure = {**enriched, 'validation_status': 'failed', 'validation_error': str(exc)[:1000]}
             failures.append(failure)
-            # Surface schema-valid positive claims on any axis for review, without
-            # counting them as validated evidence or completed windows.
+            # Surface schema-valid positive claims for review, without counting
+            # them as validated evidence or completed windows.
+            from jsonschema import Draft202012Validator
             result = row.get('result')
             if (row.get('status') == 'success' and row.get('text_sha256') == u['text_sha256']
-                    and schema_validator.is_valid(result) and positive_axes(result)):
-                unverified.append({**failure, 'positive_axes': positive_axes(result),
-                                   'validation_status': 'unverified_candidate'})
+                    and Draft202012Validator(cfg['schema']).is_valid(result)
+                    and result['hacking_attempt']['assessment'] in POSITIVE):
+                unverified.append({**failure, 'validation_status': 'unverified_candidate'})
             continue
-        cited = defaultdict(list)
-        for o in offsets:
-            cited[o['segment_id']].append(o.get('chunk_id'))
-        # An action's span is its whole referenced segment; support says whether the
-        # model also cited a chunk there, or only named the segment.
         action_refs = [{'action_index': i, 'segments': [
             {'segment_id': sid, 'source': u['segment_sources'][sid],
              'source_start': u['source_offsets'][sid][0],
-             'length': u['source_offsets'][sid][1] - u['source_offsets'][sid][0],
-             'support': 'cited' if sid in cited else 'segment_reference_only',
-             'cited_chunk_ids': [c for c in cited.get(sid, []) if c is not None]}
+             'length': u['source_offsets'][sid][1] - u['source_offsets'][sid][0]}
             for sid in action['evidence_ids']]}
             for i, action in enumerate(row['result']['action_evidence'])]
-        valid.append({**enriched, 'positive_axes': positive_axes(row['result']), 'evidence_offsets': offsets,
+        valid.append({**enriched, 'evidence_offsets': offsets,
                       'action_evidence_sources': action_refs, 'validation_status': 'validated'})
         if uid in labels:
             flag = row['result']['hacking_attempt']['assessment'] in POSITIVE
@@ -478,24 +427,23 @@ def report(args):
     events = []
     for eid, n in expected.items():
         rows = by_event[eid]
+        labs = {r['result']['hacking_attempt']['assessment'] for r in rows}
         # A capture that could not be read leaves the event incomplete, never negative.
         unreadable = len(event_meta.get(eid, {}).get('body_gaps') or [])
         complete = len(rows) == n and not unreadable
-        assessments = {a: event_label({r['result'][a]['assessment'] for r in rows}, complete) for a in AXES}
-        supported = any('provider_attribution' in r['positive_axes'] for r in rows)
-        assessments['provider_attribution'] = SUPPORTED if supported else ('not_established' if complete else 'incomplete')
-        flagged = {a: [r['unit_id'] for r in rows if a in r['positive_axes']] for a in ALL_AXES}
-        events.append({'event_id': eid, 'assessment': assessments['hacking_attempt'], 'complete': complete,
+        label = next((x for x in ['likely', 'possible'] if x in labs), None)
+        if label is None:
+            label = 'incomplete' if not complete else ('insufficient_evidence' if 'insufficient_evidence' in labs else 'no_evidence')
+        events.append({'event_id': eid, 'assessment': label, 'complete': complete,
                        'validated_windows': len(rows), 'expected_windows': n, 'unreadable_captures': unreadable,
-                       'flagged_units': flagged['hacking_attempt'],
-                       'assessments': assessments,
-                       'positive_axes': [a for a in ALL_AXES if flagged[a]],
-                       'flagged_units_by_axis': {a: ids for a, ids in flagged.items() if ids}})
-    # Windows positive on any axis are queued. Old runs retain their saved schema
-    # and have no score; never invent one.
+                       'flagged_units': [r['unit_id'] for r in rows if r['result']['hacking_attempt']['assessment'] in POSITIVE]})
+    # Old runs retain their saved schema and have no score; never invent one.
     review_queue = [
         {**r, 'hacking_confidence': r['result']['hacking_attempt'].get('confidence')}
-        for r in valid + unverified if r['positive_axes']
+        for r in valid if r['result']['hacking_attempt']['assessment'] in POSITIVE
+    ] + [
+        {**r, 'hacking_confidence': r['result']['hacking_attempt'].get('confidence')}
+        for r in unverified
     ]
     review_queue.sort(key=lambda r: (
         r['hacking_confidence'] is None,
@@ -511,10 +459,6 @@ def report(args):
                'pending_units': len(pending), 'events': len(events),
                'unverified_candidates': len(unverified),
                'event_assessments': dict(Counter(e['assessment'] for e in events)),
-               'event_assessments_by_axis': {a: dict(Counter(e['assessments'][a] for e in events)) for a in ALL_AXES},
-               'review_queue_windows': len(review_queue),
-               'windows_with_uncited_action_segments': sum(
-                   any(s['support'] != 'cited' for a in r['action_evidence_sources'] for s in a['segments']) for r in valid),
                'controls': checks, 'controls_passed': sum(c['passed'] for c in checks),
                'control_validation_failures': sum(f['unit_id'] in labels for f in failures),
                'ignored_control_outputs': len((set(outputs) & set(labels)) - set(units)),

@@ -1,4 +1,4 @@
-"""Report: every axis reaches the outputs, outputs must come from this run, claims need evidence."""
+"""Report: outputs must come from this prepared run; unreadable captures stay incomplete."""
 import contextlib
 import copy
 import io
@@ -75,45 +75,6 @@ class ReportTests(unittest.TestCase):
         write_worker(self.root / 'outputs', cfg, rows)
         return self.report(prepared)
 
-    def test_secondary_axes_reach_events_queue_and_summary(self):
-        out = self.run_report([('agent', judgment(agentic='likely')),
-                               ('coord', judgment(coordination='possible', cite=('nonexistent',))),
-                               ('quiet', judgment())])
-        events = {e['event_id']: e for e in out['event-results']}
-        self.assertEqual(events['agent']['assessment'], 'no_evidence')
-        self.assertEqual(events['agent']['assessments']['agentic_activity'], 'likely')
-        self.assertEqual(events['agent']['positive_axes'], ['agentic_activity'])
-        self.assertEqual(events['quiet']['positive_axes'], [])
-        queue = {r['event_id']: r for r in out['review-queue']}
-        self.assertEqual(queue['agent']['positive_axes'], ['agentic_activity'])
-        self.assertEqual(queue['coord']['validation_status'], 'unverified_candidate')
-        self.assertNotIn('quiet', queue)
-        self.assertEqual([r['event_id'] for r in out['unverified-candidates']], ['coord'])
-        by_axis = out['summary']['event_assessments_by_axis']
-        self.assertEqual(by_axis['agentic_activity'], {'likely': 1, 'no_evidence': 1, 'incomplete': 1})
-        self.assertEqual(out['summary']['preparation_gaps'], {'unknown_kind': 1})
-
-    def test_supported_attribution_needs_citation_and_basis(self):
-        out = self.run_report([
-            ('uncited', judgment(attribution='supported_by_supplied_evidence', basis='Signed note', cite=())),
-            ('no-basis', judgment(attribution='supported_by_supplied_evidence', basis='  ')),
-            ('ok', judgment(attribution='supported_by_supplied_evidence', basis='Signed note')),
-        ])
-        errors = {f['event_id']: f['validation_error'] for f in out['failures']}
-        self.assertIn('without evidence', errors['uncited'])
-        self.assertIn('without a basis', errors['no-basis'])
-        events = {e['event_id']: e for e in out['event-results']}
-        self.assertEqual(events['ok']['assessments']['provider_attribution'], 'supported_by_supplied_evidence')
-        self.assertEqual(events['ok']['positive_axes'], ['provider_attribution'])
-
-    def test_action_support_marks_uncited_segments(self):
-        out = self.run_report([('mixed', judgment(hacking='possible', actions=[('url',), ('url', 'body')]))])
-        refs = out['predictions'][0]['action_evidence_sources']
-        self.assertEqual([s['support'] for s in refs[0]['segments']], ['cited'])
-        self.assertEqual(refs[0]['segments'][0]['cited_chunk_ids'], [1])
-        self.assertEqual([s['support'] for s in refs[1]['segments']], ['cited', 'segment_reference_only'])
-        self.assertEqual(out['summary']['windows_with_uncited_action_segments'], 1)
-
     def test_outputs_from_another_config_are_rejected(self):
         prepared, cfg, rows = self.prepare([('a', judgment())])
         write_worker(self.root / 'outputs', {**cfg, 'system_prompt': 'another rubric'}, rows)
@@ -147,6 +108,7 @@ class ReportTests(unittest.TestCase):
         self.assertEqual((events['a']['complete'], events['a']['assessment'], events['a']['unreadable_captures']),
                          (False, 'incomplete', 1))
         self.assertEqual((events['b']['complete'], events['b']['assessment']), (True, 'no_evidence'))
+        self.assertEqual(self.report(prepared)['summary']['preparation_gaps'], {'unknown_kind': 1})
 
     def test_identity_written_by_inference_runner_is_accepted(self):
         prepared, cfg, rows = self.prepare([('a', judgment())])

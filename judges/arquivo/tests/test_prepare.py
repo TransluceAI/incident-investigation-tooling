@@ -1,4 +1,4 @@
-"""Preparation: body-only slicing, malformed inputs as gaps, configured limits, controls."""
+"""Preparation: malformed inputs as gaps, window size from the engine settings, controls."""
 import contextlib
 import hashlib
 import io
@@ -10,51 +10,17 @@ from types import SimpleNamespace
 import unittest
 
 from arquivo_judge.common import iter_jsonl
-from arquivo_judge.evidence import build_segments, validate_chunk_map
-from arquivo_judge.pipeline import controls, make_units, prepare, windows
+from arquivo_judge.pipeline import controls, prepare
 from support import install_fake_transformers
 
 TOOL = Path(__file__).resolve().parents[1]
-EVENT = {'event_id': 'e1', 'original_url': 'https://api.example/run?url=https%3A%2F%2Fa.example%2F&function=async()=>fetch("/x")',
-         'capture_timestamp': '20260101000000', 'body': {'document_path': 'documents/body.txt'}}
 
 
 def sha(text):
     return hashlib.sha256(text.encode()).hexdigest()
 
 
-class WindowTests(unittest.TestCase):
-    def test_small_event_is_one_window_without_part_marker(self):
-        units = list(make_units('e1', build_segments(EVENT, 'short body'), len))
-        self.assertEqual(len(units), 1)
-        self.assertNotIn(' PART ', units[0]['text'])
-
-    def test_large_body_is_sliced_beside_every_other_segment(self):
-        segs = build_segments(EVENT, 'abcdefghij' * 3000)
-        context = {s['segment_id'] for s in segs if s['kind'] != 'BODY'}
-        self.assertTrue({'URL_DECODED', 'PROGRAM'} <= {s['kind'] for s in segs})
-        units = list(make_units('e1', segs, len, budget=12000))
-        self.assertGreater(len(units), 1)
-        body = next(s for s in segs if s['kind'] == 'BODY')
-        for i, u in enumerate(units, 1):
-            validate_chunk_map(u)
-            self.assertLessEqual(u['prompt_tokens'], 12000)
-            self.assertEqual(set(u['source_offsets']), context | {body['segment_id']})
-            self.assertIn(f'BODY PART {i} OF {len(units)}]', u['text'])
-        covered = sorted(u['source_offsets'][body['segment_id']] for u in units)
-        self.assertEqual(covered[0][0], 0)
-        self.assertEqual(covered[-1][1], len(body['text']))
-        for (_, end), (start, _) in zip(covered, covered[1:]):
-            self.assertLessEqual(start, end)
-
-    def test_oversized_context_falls_back_to_event_and_url(self):
-        segs = build_segments(EVENT, 'b' * 5000)
-        segs.insert(2, {'segment_id': 'e1:big', 'kind': 'DECODED_B64', 'source': 'test', 'text': 'z' * 6000})
-        parts = windows(segs, len, budget=9000)
-        # One window per non-fixed segment, each beside EVENT and URL only.
-        self.assertEqual([[s['kind'] for s in p] for p, _ in parts],
-                         [['EVENT', 'URL', kind] for kind in ('DECODED_B64', 'URL_DECODED', 'NESTED_URL', 'PROGRAM', 'BODY')])
-
+class ControlTests(unittest.TestCase):
     def test_missing_body_controls_render_without_a_body(self):
         units, labels = controls(len)
         for name in ('sql', 'traversal', 'config'):
@@ -124,18 +90,6 @@ class PrepareTests(unittest.TestCase):
         self.assertIn('BODY: unreadable', unit['text'])
         self.assertEqual(json.loads((out / 'preparation.json').read_text())['units'], 3)
 
-    def test_large_body_is_sliced_beside_decoded_views(self):
-        text = 'line of response text\n' * 12000
-        (self.corpus / 'documents/big.txt').write_text(text)
-        self.add_records({'observation_id': 'big', 'kind': 'arquivo_capture', 'document_path': 'documents/big.txt',
-                          'text_sha256': sha(text), 'metadata': {'original_url': 'https://big.example/p?q=1&r=2',
-                                                                 'capture_timestamp': '20260101000000'}})
-        units = [u for u in iter_jsonl(self.prepare() / 'units.jsonl') if 'big.example' in u['text']]
-        self.assertGreater(len(units), 1)
-        for i, u in enumerate(units, 1):
-            self.assertIn(' URL_DECODED]', u['text'])
-            self.assertIn(f' BODY PART {i} OF {len(units)}]', u['text'])
-
     def test_hash_mismatch_still_stops_preparation(self):
         (self.corpus / 'documents/population.csv').write_text('altered')
         with self.assertRaisesRegex(ValueError, 'hash mismatch'):
@@ -146,16 +100,14 @@ class PrepareTests(unittest.TestCase):
         summary = json.loads((self.prepare() / 'preparation.json').read_text())
         self.assertEqual((summary['units'], summary['max_prompt_tokens']), (0, 0))
 
-    def test_engine_limits_are_respected(self):
-        engine = {**self.engine, 'host_batch_records': 4, 'host_batch_tokens': 50000,
-                  'engine': {**self.engine['engine'], 'max_model_len': 20000}}
+    def test_window_size_follows_model_context(self):
+        engine = {**self.engine, 'engine': {**self.engine['engine'], 'max_model_len': 20000}}
         (self.corpus / 'documents/population.csv').write_text('year,population\n' * 3000)
         records = list(iter_jsonl(self.corpus / 'resources/arquivo.pt/records.jsonl'))
         records[1]['text_sha256'] = sha('year,population\n' * 3000)
         (self.corpus / 'resources/arquivo.pt/records.jsonl').write_text(''.join(json.dumps(r) + '\n' for r in records))
         out = self.prepare(engine)
         cfg = json.loads((out / 'config.json').read_text())
-        self.assertEqual((cfg['host_batch_records'], cfg['host_batch_tokens']), (4, 50000))
         self.assertEqual(cfg['window_budget'], 20000 - self.engine['sampling']['max_tokens'])
         units = list(iter_jsonl(out / 'units.jsonl'))
         self.assertGreater(len(units), 2)

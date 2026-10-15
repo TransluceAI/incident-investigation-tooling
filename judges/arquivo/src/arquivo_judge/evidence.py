@@ -7,14 +7,6 @@ SEG_OPEN = "[SEGMENT {sid} {kind}]\n"
 SEG_CLOSE = "\n[/SEGMENT]\n"
 
 
-def segment_header(segment):
-    """Open marker; a sliced segment also says which part of it this window holds."""
-    kind = segment['kind']
-    if segment.get('part'):
-        kind += ' PART {} OF {}'.format(*segment['part'])
-    return SEG_OPEN.format(sid=segment['segment_id'], kind=kind)
-
-
 def build_segments(event: dict, body_text) -> list:
     segs = []
 
@@ -71,7 +63,7 @@ def render_citable(segments, source_offsets=None):
     for s in segments:
         sid = s['segment_id']
         base = source_offsets[sid][0] if source_offsets is not None else 0
-        text += segment_header(s)
+        text += SEG_OPEN.format(sid=sid, kind=s['kind'])
         begin = len(text)
         chunks[sid] = []
         for start in range(0, len(s['text']), 240):

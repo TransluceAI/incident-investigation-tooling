@@ -34,7 +34,7 @@ python -m pip install -e '.[prepare]'   # Also prepare inputs with Transformers
 python -m pip install -e '.[gpu]'
 ```
 
-Place the model weights and tokenizer in a local directory. Copy `config/engine.example.json` to `config/engine.local.json` and set `model` to that directory's absolute path. Preparation and the runner use local model files only. The example preserves the completed run's engine and sampling settings; other models or hardware may require different settings and validation. Preparation keeps the file's `host_batch_records` and `host_batch_tokens`, and sizes input windows to `min(160000, max_model_len - sampling.max_tokens, host_batch_tokens)` tokens (recorded as `window_budget` in `prepared/config.json`; set `window_budget` in the file to lower it).
+Place the model weights and tokenizer in a local directory. Copy `config/engine.example.json` to `config/engine.local.json` and set `model` to that directory's absolute path. Preparation and the runner use local model files only. The example preserves the completed run's engine and sampling settings; other models or hardware may require different settings and validation. Preparation sizes input windows to `min(160000, max_model_len - sampling.max_tokens)` tokens and records the result as `window_budget` in `prepared/config.json`; set `window_budget` in the engine file to lower it.
 
 ## Prepare and run
 
@@ -62,8 +62,6 @@ sbatch --export=ALL --output="$PWD/runs/full/logs/%A_%a.log" scripts/run.sbatch
 
 Use fresh preparation and output paths for each new experiment. `shard_all.py` includes every canonical corpus window exactly once and excludes synthetic controls; `audit.py` then checks character coverage and that `full-shards/` assigns every window exactly once, and fails with a message rather than an `assert`. The commands here do not evaluate the synthetic controls: `controls: []` and `controls_passed: 0` in the report mean no controls were run, and `ignored_control_outputs` counts control outputs left out of a report. `prepare` also writes `pilot.jsonl` and `shard-N.jsonl` for a pilot workflow; the commands here do not run them. Choose any partition/account options required by your cluster when submitting. `shard_all.py --shards N` (default 8) sets the number of single-GPU workers; submit the launcher with a matching array, e.g. `sbatch --array=0-$((N-1)) ...`. The model and Python environment must be accessible from every worker.
 
-An event too long for one window is split. Every segment other than BODY (metadata, URL, decoded views, redirects) repeats in each window and only the BODY text is sliced, with a `PART i OF n` marker, so request-side evidence and the response are judged together. If those other segments alone would use more than a third of the window, only EVENT and URL repeat and each other segment is sliced on its own.
-
 For a single GPU, run one shard directly instead:
 
 ```sh
@@ -85,14 +83,12 @@ python -m arquivo_judge.pipeline report \
   --outputs "$OUTPUT_DIR" --out runs/full/report
 ```
 
-- `summary.json`: event/window counts, per-axis event counts, validation status, preparation gap counts, and token totals.
+- `summary.json`: event/window counts, validation status, preparation gap counts, and token totals.
 - `judgments.jsonl`: every committed judgment, including validation failures.
-- `predictions.jsonl`: validated judgments with extracted source locations. Each action's `action_evidence_sources` entry marks a referenced segment `cited` when the judgment also cites a chunk there, or `segment_reference_only` when the action only names the segment; the span given is the whole segment either way.
-- `event-results.jsonl`: event-level assessments and completion status. `assessment` is the hacking label; `assessments` gives every axis (hacking, agent activity, coordination, provider attribution) and `positive_axes` lists the positive ones.
-- `review-queue.jsonl`: windows positive on any axis, including explicitly unverified positives, each with `positive_axes`, sorted by descending `hacking_confidence` (0–1). Higher scores mean stronger model-estimated evidence of a hacking attempt; they are not calibrated probabilities or confidence in a negative label, so windows positive only on other axes usually sort low. Validation status remains explicit regardless of score.
+- `predictions.jsonl`: validated judgments with extracted source locations.
+- `event-results.jsonl`: event-level assessments and completion status. An event with a capture that could not be read (`unreadable_captures`) is never complete.
+- `review-queue.jsonl`: positive windows, including explicitly unverified positives, sorted by descending `hacking_confidence` (0–1). Higher scores mean stronger model-estimated evidence of a hacking attempt; they are not calibrated probabilities or confidence in a negative label. Validation status remains explicit regardless of score.
 - `failures.jsonl`, `pending.jsonl`, `unverified-candidates.jsonl`: exceptions kept visible rather than treated as negatives.
-
-A positive claim on any axis, including `supported_by_supplied_evidence` attribution, needs at least one resolved citation; supported attribution also needs a non-empty `basis`.
 
 New judgments require `hacking_attempt.confidence` in the schema. The queue also exposes it as `hacking_confidence` for sorting. Historical runs are validated against their saved schema and remain reportable; missing scores are `null` and sort last. To obtain scores for old evidence, prepare a fresh run and rerun inference rather than reusing or resuming old outputs.
 
@@ -114,7 +110,7 @@ Supported kinds:
 - `arquivo_capture`: stored response text with `metadata.original_url` and `metadata.capture_timestamp` (also accepted under `original_record.metadata`).
 - `provider_redirect`: `source_url` identifies an archive replay URL; its document stores the redirect destination as text.
 
-Records may also carry `scope`, `time_basis`, and `raw_path` provenance. Malformed or unsupported observations (unparseable lines, missing IDs, fields of the wrong type, captures without metadata, documents that cannot be read, empty redirects) are recorded in `gaps.jsonl` and skipped. A capture whose text is missing, has no hash, or cannot be read keeps its event: the model sees `BODY: unreadable`, and the event is reported incomplete (`unreadable_captures`), never negative. Duplicate observation IDs and documents that do not match their recorded hash stop preparation. See `examples/corpus/` for a synthetic index and response body; it illustrates the format, not judge accuracy.
+Records may also carry `scope`, `time_basis`, and `raw_path` provenance. Malformed or unsupported observations (unparseable lines, missing IDs, fields of the wrong type, captures without metadata, documents that cannot be read, empty redirects) are recorded in `gaps.jsonl` and skipped. A capture whose text is missing, has no hash, or cannot be read keeps its event: the model sees `BODY: unreadable`, and the event is reported incomplete, never negative. Duplicate observation IDs and documents that do not match their recorded hash stop preparation. See `examples/corpus/` for a synthetic index and response body; it illustrates the format, not judge accuracy.
 
 ## Recorded results
 
