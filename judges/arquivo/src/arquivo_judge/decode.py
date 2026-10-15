@@ -17,6 +17,8 @@ def looks_like_code(value: str) -> bool:
 
 
 def _b64(value: str):
+    # Query decoding turns "+" into a space; base64 text never contains spaces.
+    value = value.replace(" ", "+")
     if not B64_RE.match(value) or len(value) % 4 == 1:
         return None
     alt = b"-_" if ("-" in value or "_" in value) else None
@@ -39,10 +41,12 @@ def decode_url(url: str, max_depth: int = MAX_DEPTH, max_bytes: int = MAX_BYTES)
 def _walk(url, source, depth, views, gaps, max_depth, max_bytes, seen):
     if url in seen:
         return
-    seen.add(url)
+    # Mark a URL visited only once it is decoded, so a copy first met too deep
+    # is still decoded where it appears within the depth limit.
     if depth > max_depth:
         gaps.append({"source": source, "gap": "depth_exceeded"})
         return
+    seen.add(url)
     if len(url.encode("utf-8")) > max_bytes:
         gaps.append({"source": source, "gap": "size_exceeded"})
         return
@@ -51,27 +55,40 @@ def _walk(url, source, depth, views, gaps, max_depth, max_bytes, seen):
     except ValueError:
         gaps.append({"source": source, "gap": "malformed_url"})
         return
-    params = parse_qsl(parts.query, keep_blank_values=True)
-    if params:
-        lines = "\n".join(f"{k}={v}" for k, v in params)
+    query = parse_qsl(parts.query, keep_blank_values=True)
+    # Fragments are not sent to the server but are kept in archived URLs and can carry
+    # parameters or a whole URL.
+    fragment_url = parts.fragment.lower().startswith(("http://", "https://"))
+    fragment = parse_qsl(parts.fragment, keep_blank_values=True) if "=" in parts.fragment and not fragment_url else []
+    if query or fragment:
+        lines = "\n".join(f"{k}={v}" for k, v in query + fragment)
+        part = "query" if not fragment else ("fragment" if not query else "query+fragment")
         views.append({"kind": "URL_DECODED" if depth == 0 else "NESTED_URL",
-                      "source": f"{source}.query:percent-decode:{depth + 1}",
+                      "source": f"{source}.{part}:percent-decode:{depth + 1}",
                       "text": lines if depth == 0 else f"{url}\n{lines}"})
     elif depth > 0:
         views.append({"kind": "NESTED_URL", "source": f"{source}:percent-decode:{depth}", "text": url})
     for m in URL_RE.findall(parts.path):
         _walk(m, f"{source}.path.embedded", depth + 1, views, gaps, max_depth, max_bytes, seen)
-    for k, v in params:
-        if len(v.encode("utf-8")) > max_bytes:
-            gaps.append({"source": f"{source}.query.{k}", "gap": "size_exceeded"})
-            continue
-        if v.lower().startswith(("http://", "https://")):
-            _walk(v, f"{source}.query.{k}", depth + 1, views, gaps, max_depth, max_bytes, seen)
-        elif k.lower() in CODE_KEYS or looks_like_code(v):
-            views.append({"kind": "PROGRAM", "source": f"{source}.query.{k}:percent-decode:{depth + 1}", "text": v})
-            for m in URL_RE.findall(v):
-                _walk(m, f"{source}.query.{k}.embedded", depth + 1, views, gaps, max_depth, max_bytes, seen)
-        else:
-            decoded = _b64(v)
-            if decoded is not None:
-                views.append({"kind": "DECODED_B64", "source": f"{source}.query.{k}:base64:{depth + 1}", "text": decoded})
+    if fragment_url:
+        _walk(parts.fragment, f"{source}.fragment", depth + 1, views, gaps, max_depth, max_bytes, seen)
+    for where, params in (("query", query), ("fragment", fragment)):
+        for k, v in params:
+            _param(source, where, k, v, depth, views, gaps, max_depth, max_bytes, seen)
+
+
+def _param(source, where, k, v, depth, views, gaps, max_depth, max_bytes, seen):
+    if len(v.encode("utf-8")) > max_bytes:
+        gaps.append({"source": f"{source}.{where}.{k}", "gap": "size_exceeded"})
+        return
+    if v.lower().startswith(("http://", "https://")):
+        _walk(v, f"{source}.{where}.{k}", depth + 1, views, gaps, max_depth, max_bytes, seen)
+        return
+    if k.lower() in CODE_KEYS or looks_like_code(v):
+        views.append({"kind": "PROGRAM", "source": f"{source}.{where}.{k}:percent-decode:{depth + 1}", "text": v})
+        for m in URL_RE.findall(v):
+            _walk(m, f"{source}.{where}.{k}.embedded", depth + 1, views, gaps, max_depth, max_bytes, seen)
+    # A code-named parameter can still hold base64, so try it as well.
+    decoded = _b64(v)
+    if decoded is not None:
+        views.append({"kind": "DECODED_B64", "source": f"{source}.{where}.{k}:base64:{depth + 1}", "text": decoded})

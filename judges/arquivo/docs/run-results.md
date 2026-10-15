@@ -17,6 +17,8 @@ The 23 exceptions comprise 17 unknown evidence chunks, five unsupported success 
 
 The run used `Qwen/Qwen3.8-27B-FP8`, revision `017b9c7af6b5689d5dd426a76e0bc077eb5ca20a`, temperature 0, seed 17, and thinking disabled. The recorded environment used vLLM 0.31.0, Transformers 5.17.0, PyTorch 2.13.0, and jsonschema 4.26.0. The package's optional dependencies are not pinned; these are the versions used for the recorded run. The shared inference runner is taken from that run; the rubric and schema now also request a confidence score as described below. The corpus preparation default path and Slurm launcher have been adapted for portability; no new GPU run is claimed for this packaging.
 
+The recorded run also predates later reporting and preparation changes: reports now check runner identities, list every axis per event, queue windows positive on any axis, and require evidence and a basis for supported provider attribution; preparation now slices only BODY text when an event needs several windows. Re-reporting the recorded run applies the new reporting rules, so its counts can differ from the table above; the preparation changes apply only to new runs.
+
 The recorded run predates the confidence-score addition. Its saved rubric/schema and outputs have no confidence scores; the totals above are unchanged. New runs use the updated rubric/schema to produce scores. Re-reporting this historical run leaves scores `null`; it does not backfill model estimates.
 
 ## Artifact access

@@ -11,6 +11,7 @@ import unittest
 from jsonschema import Draft202012Validator
 from arquivo_judge.common import iter_jsonl, write_jsonl
 from arquivo_judge.pipeline import make_units, report
+from support import write_worker
 
 SCHEMA = json.loads((Path(__file__).resolve().parents[1] / 'config/schema.json').read_text())
 MISSING = object()
@@ -45,7 +46,8 @@ class ConfidenceTests(unittest.TestCase):
     def run_report(self, root, judgments, schema=SCHEMA):
         prepared = root / 'prepared'
         prepared.mkdir()
-        (prepared / 'config.json').write_text(json.dumps({'schema': schema}))
+        cfg = {'schema': schema}
+        (prepared / 'config.json').write_text(json.dumps(cfg))
         (prepared / 'control-labels.json').write_text('{}')
         units, rows = [], []
         for event_id, result in judgments:
@@ -55,12 +57,10 @@ class ConfidenceTests(unittest.TestCase):
             rows.append({'unit_id': unit['unit_id'], 'text_sha256': unit['text_sha256'],
                          'status': 'success', 'result': result})
         write_jsonl(prepared / 'units.jsonl', units)
-        worker = root / 'outputs/worker-0'
-        worker.mkdir(parents=True)
-        write_jsonl(worker / 'part-0.jsonl', rows)
+        write_worker(root / 'outputs', cfg, rows)
         dest = root / 'report'
         with contextlib.redirect_stdout(io.StringIO()):
-            report(SimpleNamespace(run=prepared, manifest=None, outputs=[worker.parent], out=dest))
+            report(SimpleNamespace(run=prepared, manifest=None, outputs=[root / 'outputs'], out=dest))
         return dest
 
     def test_queue_sorts_scores_and_preserves_validation_status(self):

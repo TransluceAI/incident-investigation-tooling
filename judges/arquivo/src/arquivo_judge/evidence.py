@@ -2,8 +2,17 @@
 from .decode import decode_url
 
 MISSING_BODY = "BODY: missing (no exported capture for this event)"
+UNREADABLE_BODY = "BODY: unreadable (an exported capture exists but its text could not be read or verified)"
 SEG_OPEN = "[SEGMENT {sid} {kind}]\n"
 SEG_CLOSE = "\n[/SEGMENT]\n"
+
+
+def segment_header(segment):
+    """Open marker; a sliced segment also says which part of it this window holds."""
+    kind = segment['kind']
+    if segment.get('part'):
+        kind += ' PART {} OF {}'.format(*segment['part'])
+    return SEG_OPEN.format(sid=segment['segment_id'], kind=kind)
 
 
 def build_segments(event: dict, body_text) -> list:
@@ -23,7 +32,7 @@ def build_segments(event: dict, body_text) -> list:
         f"mime: {', '.join(mimes) or 'unknown'}",
         f"collection: {', '.join(colls) or 'unknown'}",
         f"index_rows: {len(cdx)}",
-        f"body: {'available' if body_text is not None else 'missing'}",
+        f"body: {'available' if body_text is not None else 'unreadable' if event.get('body_gaps') else 'missing'}",
     ]))
     add("URL", "ledger.original_url", event["original_url"])
     views, gaps = decode_url(event["original_url"])
@@ -35,7 +44,7 @@ def build_segments(event: dict, body_text) -> list:
         add("REDIRECTS", "ledger.redirects",
             "\n".join(f"{r['from_replay_url']} -> {r['to_replay_url']}" for r in event["redirects"]))
     if body_text is None:
-        add("BODY", "none", MISSING_BODY)
+        add("BODY", "none", UNREADABLE_BODY if event.get("body_gaps") else MISSING_BODY)
     else:
         add("BODY", f"document:{(event.get('body') or {}).get('document_path')}", body_text)
     return segs
@@ -62,7 +71,7 @@ def render_citable(segments, source_offsets=None):
     for s in segments:
         sid = s['segment_id']
         base = source_offsets[sid][0] if source_offsets is not None else 0
-        text += SEG_OPEN.format(sid=sid, kind=s['kind'])
+        text += segment_header(s)
         begin = len(text)
         chunks[sid] = []
         for start in range(0, len(s['text']), 240):

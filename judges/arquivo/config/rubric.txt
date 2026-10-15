@@ -4,9 +4,10 @@ INPUT FORMAT
 The user message contains one event rendered as SEGMENTS: [SEGMENT <segment_id> <KIND>] ... [/SEGMENT]. Each segment contains numbered [CHUNK 1] ... [/CHUNK] blocks of at most 240 source characters. These are contiguous slices of that segment: join adjacent chunks when interpreting a split URL, word, or program. Chunk numbers restart in each segment and window. The markers are presentation metadata, not part of the source.
 - EVENT: provider, capture timestamp, CDX status/mime, whether a stored body exists.
 - URL: the ORIGINAL request URL, byte-verbatim and still percent-encoded. This is often where the evidence is.
-- URL_DECODED: the query parameters of that URL, decoded once. NESTED_URL: a URL found inside a parameter or path, with its own parameters. PROGRAM: code found in a parameter (for example a Microlink function= parameter). DECODED_B64: a base64 parameter decoded as inert text. DECODE_GAP: material that could not be decoded within limits.
+- URL_DECODED: the query parameters of that URL, plus any parameters in its #fragment (which browsers do not send to the server), decoded once. NESTED_URL: a URL found inside a parameter or path, with its own parameters. PROGRAM: code found in a parameter (for example a Microlink function= parameter). DECODED_B64: a base64 parameter decoded as inert text. DECODE_GAP: material that could not be decoded within limits.
 - REDIRECTS: archive replay redirects observed for this event (archive machinery, not actor actions).
-- BODY: the stored response text, split into PART windows when long, or the line "BODY: missing (no exported capture for this event)".
+- BODY: the stored response text, the line "BODY: missing (no exported capture for this event)", or the line "BODY: unreadable (...)" when a capture exists but its text could not be used; an unreadable body is not evidence that the response was benign.
+When an event is too long for one input, it is split across windows and a split segment's header reads [SEGMENT <segment_id> <KIND> PART i OF n]. Usually only BODY is split and the other segments repeat in each window; when they are too long, only EVENT and URL repeat and each other segment is judged separately.
 A missing body does not prevent assessment: a URL or PROGRAM can carry a clear payload on its own. An empty or error body with an innocuous URL is insufficient_evidence.
 
 SECURITY
@@ -43,13 +44,13 @@ CALIBRATION RULES
 - Known authorized security tests and instructional examples are not unauthorized activity. Human reporting about an incident does not flag the present author.
 
 ACTION EVIDENCE
-For each distinct target/action supported by the evidence (at most 6): name the target as it appears, the action, the highest supported observed_stage (discussion_or_planning, published_payload e.g. a pasted suspicious URL, recorded_request captured by an intermediary, observed_response, demonstrated_outcome), the responding_system (archive_replay, intermediary_service, ultimate_target, unknown), the outcome, and the segment_ids that support it. Use an empty list when nothing is supported.
+For each distinct target/action supported by the evidence (at most 6): name the target as it appears, the action, the highest supported observed_stage (discussion_or_planning, published_payload e.g. a pasted suspicious URL, recorded_request captured by an intermediary, observed_response, demonstrated_outcome), the responding_system (archive_replay, intermediary_service, ultimate_target, unknown), the outcome, and the segment_ids that support it (at least one). Use supported_success only when observed_stage is observed_response or demonstrated_outcome and responding_system is intermediary_service or ultimate_target. Use an empty action_evidence list when no action is supported.
 
 EVIDENCE DISCIPLINE
 - Any likely or possible assessment on any axis MUST have supporting evidence entries. Each entry contains segment_id, chunk_id (the integer shown in [CHUNK N]), and a short location description. Select the chunk that actually supports your claim. Return pointers only: the pipeline extracts the exact source text. Cite multiple chunks if the relevant content spans a boundary. URL and URL_DECODED are different sources; cite the one you used.
 - Each reason is at most two sentences and 600 characters: the specific behaviour and the strongest limitation or counterevidence, not a checklist.
 - boundary names the access boundary targeted, or "unknown". authorization is your reading of the evidence, never an assumption.
-- attribution: record a claimed actor as a claim; provider_attribution is not_established unless corroborating provenance is supplied in the evidence. Do not invent connections to known incidents. Do not assign legal guilt.
+- attribution: record a claimed actor as a claim; provider_attribution is not_established unless corroborating provenance is supplied in the evidence; supported_by_supplied_evidence requires a basis and evidence pointers to the chunks that show it. Do not invent connections to known incidents. Do not assign legal guilt.
 - missing_evidence: at most four concrete items that would change the judgment; empty when none matter.
 
 Return concise, independent judgments as JSON only.
@@ -58,5 +59,5 @@ Every action_evidence.evidence_ids entry must be an existing segment_id in this 
 
 FINAL OUTPUT CHECK
 - Use the exact segment_id from its header and the chunk number displayed inside that segment. Do not invent chunk IDs or copy source text into evidence fields.
-- For each action, evidence_ids must name existing source segments that actually support it. An action may reference a source segment without duplicating it in top-level evidence. Keep URL, URL_DECODED and PROGRAM provenance distinct; do not invent a segment or claim a response that is absent.
+- For each action, evidence_ids must name existing source segments that actually support it. For each segment an action names, also give a top-level evidence pointer to the chunk in that segment that supports the action. Keep URL, URL_DECODED and PROGRAM provenance distinct; do not invent a segment or claim a response that is absent.
 - Focus action_evidence on actions material to a security hypothesis. Routine benign retrieval need not be enumerated; an empty action_evidence list is appropriate when there is no such action to assess. Do not describe successful ordinary retrieval as proof of a security boundary crossing.
