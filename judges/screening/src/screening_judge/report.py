@@ -34,6 +34,11 @@ from .scores import label_probabilities
 from .validate import ValidationError, validate
 
 
+# Fields reconciliation reads. Reasoning and token logprobs are dropped once
+# scored, so memory grows with the number of requests, not generation length.
+KEPT = ("unit_id", "custom_id", "request_sha256", "run_identity", "status", "error", "result")
+
+
 def load_outputs(dirs, engine, manifests):
     outputs = {}
     code_identity = None
@@ -72,7 +77,9 @@ def load_outputs(dirs, engine, manifests):
                         raise ValueError("Output unit outside worker selected manifest: " + str(row.get("unit_id")))
                     if row["unit_id"] in outputs:
                         raise ValueError("Duplicate committed unit: " + row["unit_id"])
-                    outputs[row["unit_id"]] = row
+                    outputs[row["unit_id"]] = {
+                        **{k: row[k] for k in KEPT if k in row},
+                        "label_probs": label_probabilities(row.get("logprobs")) if row.get("status") == "success" else None}
     inference_hash = sha256_text(json.dumps(code_identity)) if code_identity is not None else None
     return outputs, inference_hash
 
@@ -113,7 +120,6 @@ def reconcile(run, output_dirs, thresholds=None, near_miss_threshold=0.2):
     by_item_axis = defaultdict(list)
     window_counts = Counter()
     seen = set()
-    windows = {}
     for w in iter_jsonl(run / "windows.jsonl"):
         window_counts[w["item_id"]] += 1
         for axis in AXES:
@@ -121,13 +127,12 @@ def reconcile(run, output_dirs, thresholds=None, near_miss_threshold=0.2):
             if uid not in requested:
                 continue
             seen.add(uid)
-            windows[uid] = w
             expected[(w["item_id"], axis)].append(uid)
             row = outputs.get(uid)
             if row is None:
                 pending.append({"unit_id": uid, "item_id": w["item_id"], "axis": axis})
                 continue
-            probs = label_probabilities(row.get("logprobs")) if row.get("status") == "success" else None
+            probs = row["label_probs"]
             base = {"unit_id": uid, "item_id": w["item_id"], "axis": axis, "window_id": w["window_id"],
                     "result": row.get("result"), "label_probs": probs, "p_yes": (probs or {}).get("yes"),
                     "run_identity": row.get("run_identity"), "config_sha256": preparation["config_sha256"],

@@ -31,13 +31,13 @@ def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def atomic_write_text(path, text: str) -> None:
-    """write -> flush -> fsync -> rename on the same filesystem, then fsync the directory."""
+def _atomic_write(path, write) -> None:
+    """write(stream) -> flush -> fsync -> rename on the same filesystem, then fsync the directory."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(path.name + ".tmp")
     with open(tmp, "w", encoding="utf-8") as out:
-        out.write(text)
+        write(out)
         out.flush()
         os.fsync(out.fileno())
     os.replace(tmp, path)
@@ -48,8 +48,13 @@ def atomic_write_text(path, text: str) -> None:
         os.close(fd)
 
 
+def atomic_write_text(path, text: str) -> None:
+    _atomic_write(path, lambda out: out.write(text))
+
+
 def write_jsonl(path, rows) -> None:
-    atomic_write_text(path, "".join(json.dumps(r, ensure_ascii=False) + "\n" for r in rows))
+    """Stream rows; the file is never held in memory as one string."""
+    _atomic_write(path, lambda out: out.writelines(json.dumps(r, ensure_ascii=False) + "\n" for r in rows))
 
 
 def iter_jsonl(path):
