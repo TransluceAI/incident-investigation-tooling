@@ -172,10 +172,7 @@ def prepare(data_root, out, count, window_tokens, config_template, config_dir=No
         raise ValueError("window_tokens and shards must be positive")
     if type(label_logprobs) is not int or not 0 <= label_logprobs <= 20:
         raise ValueError("label_logprobs must be an integer from 0 to 20")
-    if "label_logprobs" in config_template:
-        raise ValueError("Set label scores with --label-logprobs; runner profiles do not carry label_logprobs")
-    if "citation_constraints" in config_template:
-        raise ValueError("Citation narrowing is a judge option (--no-citation-constraints), not a runner profile key")
+    runner = runner_profile(config_template)
     if type(citation_constraints) is not bool:
         raise ValueError("citation_constraints must be true or false")
     out = Path(out)
@@ -213,7 +210,6 @@ def prepare(data_root, out, count, window_tokens, config_template, config_dir=No
     write_jsonl(out / "coverage.jsonl", coverage)
     write_jsonl(out / "gaps.jsonl", gaps)
     atomic_write_text(out / "config.json", json.dumps(config, ensure_ascii=False, indent=2) + "\n")
-    runner = {k: v for k, v in config_template.items() if k not in NOT_FOR_RUNNER}
     atomic_write_text(out / "engine.json", json.dumps(runner, ensure_ascii=False, indent=2) + "\n")
     summary = {"version": VERSION, "items": len(items), "windows": n_windows,
                "requests": n_windows * len(AXES),
@@ -228,25 +224,41 @@ def prepare(data_root, out, count, window_tokens, config_template, config_dir=No
                                    ("requests.jsonl", "engine.json", "windows.jsonl", "items.jsonl",
                                     "coverage.jsonl", "gaps.jsonl")}}
     if shards > 1:
-        # part-N.jsonl is the runner launcher's --shard-dir naming. A window's three
-        # axis requests stay together and adjacent so they share the prefix cache.
-        (out / "shards").mkdir()
-        from .common import iter_jsonl
-        from itertools import groupby
-        loads = [0] * shards
-        with contextlib.ExitStack() as stack:
-            names = [f"shards/part-{i}.jsonl" for i in range(shards)]
-            writers = [stack.enter_context(jsonl_stream(out / name)) for name in names]
-            window = lambda row: row["custom_id"].rsplit(":", 1)[0]
-            for _, group in groupby(iter_jsonl(out / "requests.jsonl"), key=window):
-                worker = min(range(shards), key=lambda i: (loads[i], i))
-                for row in group:
-                    writers[worker](row)
-                    loads[worker] += sum(len(m["content"]) for m in row["body"]["messages"])
+        names, loads = write_shards(out, shards)
         summary["artifact_hashes"].update({name: sha256_file(out / name) for name in names})
         summary["shard_characters"] = loads
     atomic_write_text(out / "preparation.json", json.dumps(summary, indent=2) + "\n")
     return summary
+
+
+def runner_profile(config_template):
+    """The runner's config: the profile's engine and sampling settings only."""
+    if "label_logprobs" in config_template:
+        raise ValueError("Set label scores with --label-logprobs; runner profiles do not carry label_logprobs")
+    if "citation_constraints" in config_template:
+        raise ValueError("Citation narrowing is a judge option (--no-citation-constraints), not a runner profile key")
+    return {k: v for k, v in config_template.items() if k not in NOT_FOR_RUNNER}
+
+
+def write_shards(out, shards):
+    """Split requests.jsonl into shards/part-N.jsonl (the runner launcher's --shard-dir naming).
+
+    A window's axis requests stay together and adjacent so they share the prefix cache.
+    """
+    from itertools import groupby
+    from .common import iter_jsonl
+    (out / "shards").mkdir()
+    loads = [0] * shards
+    names = [f"shards/part-{i}.jsonl" for i in range(shards)]
+    with contextlib.ExitStack() as stack:
+        writers = [stack.enter_context(jsonl_stream(out / name)) for name in names]
+        window = lambda row: row["custom_id"].rsplit(":", 1)[0]
+        for _, group in groupby(iter_jsonl(out / "requests.jsonl"), key=window):
+            worker = min(range(shards), key=lambda i: (loads[i], i))
+            for row in group:
+                writers[worker](row)
+                loads[worker] += sum(len(m["content"]) for m in row["body"]["messages"])
+    return names, loads
 
 
 def _prepare_item(item, corpus, gaps, config, count, widest, window_tokens, put_window, put_request, coverage,
