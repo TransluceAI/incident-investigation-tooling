@@ -90,13 +90,33 @@ Reports check prepared artifact hashes, worker configuration against `engine.jso
 
 Every axis answer includes `confidence`, the model's 0–1 estimate that the evidence shows the behaviour that axis asks about, as in the Arquivo judge's hacking confidence. It ranks evidence, not certainty in the chosen label: a confidently negative answer should score near 0. Item results report `confidence_max` per axis. `label_probs` and `p_yes` are diagnostic first-token branch scores. Neither score is a calibrated probability. The report computes them from the runner's raw final-answer logprobs; incomplete logprobs produce no score. Optional `--thresholds /path/to/thresholds.json` applies exploratory development-set ranking bands to already verified positives; it never promotes negative or abstaining judgments. Bands are bound to the classifier and inference implementation. Without applicable bands, positives remain `positive_uncalibrated`.
 
+## Two-pass cascade
+
+Run every request once with reasoning off, then re-judge only the requests that matter with reasoning on:
+
+```sh
+screening-judge escalate \
+  --run "$PREPARED_DIR" --report "$RUN_ROOT/report" \
+  --engine /absolute/path/to/inference/qwen/.runtime/config/qwen3.8-27b-fp8.thinking.controls.json \
+  --out "$RUN_ROOT/pass2" --audit-rate 0.03 --shards 8
+# Run inference on "$RUN_ROOT/pass2" exactly as for pass 1, then:
+screening-judge report --run "$RUN_ROOT/pass2" --outputs "$RUN_ROOT/pass2-inference/outputs" --out "$RUN_ROOT/pass2-report"
+screening-judge cascade \
+  --pass1-report "$RUN_ROOT/report" --pass2-run "$RUN_ROOT/pass2" \
+  --pass2-report "$RUN_ROOT/pass2-report" --out "$RUN_ROOT/cascade"
+```
+
+`escalate` selects pass-1 positives on any axis, unverified positives, abstentions, failures, negatives with P(yes) in the `--borderline` band (default 0.2–0.8), every axis of a window that a pass-0 rule flags, and a seeded random `--audit-rate` sample of the remaining negatives. Pass-0 rules (`rules.py`) are cheap triggers for patterns pass 1 under-flagged: non-default backend ports, raw-IP requests with an overridden Host or SNI, `dav/versions` paths, and CAPTCHA-to-OCR chains; they are not yet measured against labelled data. The pass-2 directory is an ordinary prepared run over that subset of the same requests with the pass-2 runner profile, and `selection.jsonl` records each request's reasons. Escalation refuses a pass 1 with pending requests unless `--allow-pending` is given.
+
+`cascade` uses the pass-2 answer wherever pass 2 validated one and otherwise keeps pass 1. It writes `final-judgments.jsonl`, `review-queue.jsonl`, and `demoted.jsonl`: pass-1 positives that pass 2 no longer supports, kept visible at low priority until calibration shows reasoning does not lose real attacks. `summary.json` counts demotions, promotions and pass-2 failures, and how many audited negatives pass 2 found positive, which estimates pass-1 misses. Cost relative to reasoning on everything, and whether the cascade matches its recall, still need measuring on labelled data.
+
 ## Tests
 
 ```sh
 PYTHONPATH=src python -m unittest discover -s tests -v
 ```
 
-The suite uses synthetic data and simulated runner outputs. It covers evidence preservation, request contents, citation narrowing and resolution, label scores, worker assignment, failure handling, benchmark isolation, and evaluation joins. It requires no model, GPU, or network access. `test_shared_runner.py` runs prepared requests through the shared runner with a simulated engine; it skips when `inference/qwen` is absent, and `QWEN_RUNNER=/path/to/inference_runner.py` selects another checkout.
+The suite uses synthetic data and simulated runner outputs. It covers evidence preservation, provenance in every window, request contents, citation narrowing and resolution, label and confidence scores, the review queue, the two-pass cascade and pass-0 rules, worker assignment, failure handling, benchmark isolation, and evaluation joins. It requires no model, GPU, or network access. `test_shared_runner.py` runs prepared requests through the shared runner with a simulated engine; it skips when `inference/qwen` is absent, and `QWEN_RUNNER=/path/to/inference_runner.py` selects another checkout.
 
 ## Input format
 
@@ -138,7 +158,7 @@ Test metrics are excluded unless explicitly requested with `evaluate --include-t
 
 ## Recorded results
 
-Local verification on 2026-10-16: **49 CPU tests pass**, including the shared-runner contract test against the `inference/qwen` runner from the separate inference branch; without that runner the contract test is skipped. Earlier, the renamed package built successfully as a wheel; its bundled policies and CLI entry point were checked from an extracted installation outside the checkout.
+Local verification on 2026-10-16: **55 CPU tests pass**, including the shared-runner contract test against the `inference/qwen` runner from the separate inference branch; without that runner the contract test is skipped. Earlier, the renamed package built successfully as a wheel; its bundled policies and CLI entry point were checked from an extracted installation outside the checkout.
 
 No actual-model accuracy or calibration results are recorded for this judge yet. GPU compatibility, injection resistance, repeatability, and full-corpus memory/throughput remain unmeasured. Windows preserve text but can separate related context; cross-document reasoning is not implemented. Arquivo experiment results do not establish this judge's performance.
 

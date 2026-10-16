@@ -1,9 +1,10 @@
-"""Command line: prepare, report, evaluate, compare."""
+"""Command line: prepare, report, escalate, cascade, evaluate, compare."""
 import argparse
 import json
 from functools import lru_cache
 from pathlib import Path
 
+from . import cascade
 from . import evaluate as ev
 from .prepare import prepare
 from .report import reconcile, write_report
@@ -59,6 +60,23 @@ def main():
     b.add_argument("--out", required=True)
     b.add_argument("--thresholds", help="thresholds.json from evaluate (dev split only)")
     b.add_argument("--near-miss", type=float, default=0.2)
+    e = sub.add_parser("escalate", help="Select pass-1 requests for a reasoning pass and write that run")
+    e.add_argument("--run", required=True, help="Pass-1 prepared run")
+    e.add_argument("--report", required=True, help="Pass-1 report directory")
+    e.add_argument("--engine", required=True, help="Runner profile for pass 2 (reasoning on)")
+    e.add_argument("--out", required=True)
+    e.add_argument("--borderline", type=float, nargs=2, default=(0.2, 0.8), metavar=("LOW", "HIGH"),
+                   help="Re-judge pass-1 negatives with P(yes) in this band")
+    e.add_argument("--audit-rate", type=float, default=0.03,
+                   help="Fraction of remaining pass-1 negatives re-judged at random (estimates misses)")
+    e.add_argument("--seed", type=int, default=0)
+    e.add_argument("--shards", type=int, default=1)
+    e.add_argument("--allow-pending", action="store_true")
+    f = sub.add_parser("cascade", help="Merge pass-1 and pass-2 reports into final judgments and queues")
+    f.add_argument("--pass1-report", required=True)
+    f.add_argument("--pass2-run", required=True)
+    f.add_argument("--pass2-report", required=True)
+    f.add_argument("--out", required=True)
     c = sub.add_parser("evaluate", help="Score item results against a labeled key")
     c.add_argument("--results", required=True)
     c.add_argument("--key", required=True)
@@ -88,6 +106,12 @@ def main():
         thresholds = json.loads(Path(args.thresholds).read_text()) if args.thresholds else None
         parts = reconcile(args.run, args.outputs, thresholds, args.near_miss)
         print(json.dumps(write_report(args.out, *parts, thresholds), indent=2))
+    elif args.command == "escalate":
+        engine = json.loads(Path(args.engine).read_text())
+        print(json.dumps(cascade.escalate(args.run, args.report, args.out, engine, tuple(args.borderline),
+                                          args.audit_rate, args.seed, args.shards, args.allow_pending), indent=2))
+    elif args.command == "cascade":
+        print(json.dumps(cascade.combine(args.pass1_report, args.pass2_run, args.pass2_report, args.out), indent=2))
     elif args.command == "evaluate":
         out = Path(args.out)
         out.mkdir(parents=True, exist_ok=True)
