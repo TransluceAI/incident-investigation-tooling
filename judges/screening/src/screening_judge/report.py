@@ -11,6 +11,10 @@ Item assessment per axis:
 Schema-valid yes answers whose citations failed go to unverified-candidates.
 Windows answered no with P(yes) >= near_miss_threshold go to near-misses for
 recall audits; they are never counted as positive.
+
+Outputs come from the shared runner (inference/qwen). Each committed row must
+answer exactly the prepared request: its custom_id and request hash are checked
+against requests.jsonl. Label scores are computed here from the raw logprobs.
 """
 import json
 from collections import Counter, defaultdict
@@ -18,12 +22,13 @@ from itertools import islice
 from pathlib import Path
 
 from . import controls as control_set
-from .common import atomic_write_text, iter_jsonl, write_jsonl, sha256_text, sha256_file
+from .common import atomic_write_text, iter_jsonl, write_jsonl, request_sha256, sha256_text, sha256_file
 from .schemas import AXES, FINDINGS_CYBERATTACK
+from .scores import label_probabilities
 from .validate import ValidationError, validate
 
 
-def load_outputs(dirs, config, manifests):
+def load_outputs(dirs, engine, manifests):
     outputs = {}
     code_identity = None
     for directory in dirs:
@@ -40,7 +45,7 @@ def load_outputs(dirs, config, manifests):
             digest = identity.pop("identity")
             if digest != sha256_text(json.dumps(identity, sort_keys=True)):
                 raise ValueError("Worker identity hash mismatch")
-            if identity["config"] != config:
+            if identity["config"] != engine:
                 raise ValueError("Worker config does not match prepared run")
             if identity["manifest_hash"] not in manifests:
                 raise ValueError("Worker manifest does not belong to prepared run")
@@ -48,10 +53,10 @@ def load_outputs(dirs, config, manifests):
             if limit is not None and (type(limit) is not int or limit < 1):
                 raise ValueError("Invalid worker manifest selection limit")
             selected = islice(iter_jsonl(manifests[identity["manifest_hash"]]), limit)
-            allowed = {f"{unit['unit_id']}:{axis}" for unit in selected for axis in unit["axes"]}
-            code = (identity["runner_hash"], identity["prompts_hash"])
+            allowed = {row["custom_id"] for row in selected}
+            code = identity["runner_hash"]
             if code_identity is not None and code != code_identity:
-                raise ValueError("Mixed runner/prompt implementations")
+                raise ValueError("Mixed runner implementations")
             code_identity = code
             for part in sorted(worker.glob("part-*.jsonl")):
                 for row in iter_jsonl(part):
@@ -78,6 +83,7 @@ def grade(p_yes, thresholds, axis):
 def reconcile(run, output_dirs, thresholds=None, near_miss_threshold=0.2):
     run = Path(run)
     config = json.loads((run / "config.json").read_text())
+    engine = json.loads((run / "engine.json").read_text())
     items = {i["item_id"]: i for i in iter_jsonl(run / "items.jsonl")}
     preparation = json.loads((run / "preparation.json").read_text())
     if preparation["config_sha256"] != sha256_file(run / "config.json"):
@@ -89,8 +95,9 @@ def reconcile(run, output_dirs, thresholds=None, near_miss_threshold=0.2):
         raise ValueError("Threshold config does not match prepared run")
     coverage = {c["item_id"]: c for c in iter_jsonl(run / "coverage.jsonl")}
     manifests = {digest: run / name for name, digest in preparation["artifact_hashes"].items()
-                 if name == "manifest.jsonl" or name.startswith("shards/")}
-    outputs, inference_hash = load_outputs(output_dirs, config, manifests)
+                 if name == "requests.jsonl" or name.startswith("shards/")}
+    requested = {row["custom_id"]: request_sha256(row["body"]) for row in iter_jsonl(run / "requests.jsonl")}
+    outputs, inference_hash = load_outputs(output_dirs, engine, manifests)
     if thresholds is not None and thresholds.get("inference_sha256") != inference_hash:
         raise ValueError("Threshold inference implementation does not match this run")
     expected = defaultdict(list)
@@ -108,21 +115,14 @@ def reconcile(run, output_dirs, thresholds=None, near_miss_threshold=0.2):
             if row is None:
                 pending.append({"unit_id": uid, "item_id": w["item_id"], "axis": axis})
                 continue
+            probs = label_probabilities(row.get("logprobs")) if row.get("status") == "success" else None
             base = {"unit_id": uid, "item_id": w["item_id"], "axis": axis, "window_id": w["window_id"],
-                    "result": row.get("result"), "label_probs": row.get("label_probs"),
+                    "result": row.get("result"), "label_probs": probs,
                     "run_identity": row.get("run_identity"), "config_sha256": preparation["config_sha256"],
                     "source": items[w["item_id"]]["source"]}
             try:
-                if (row.get("axis") != axis or row.get("window_id") != w["window_id"]
-                        or row.get("chunk_idx") != w["chunk_idx"]):
-                    raise ValidationError("Output unit metadata mismatch")
-                probs = row.get("label_probs")
-                if probs is not None:
-                    import math
-                    if (not isinstance(probs, dict) or set(probs) != {"yes", "no", "insufficient_evidence"}
-                            or any(type(p) not in (int, float) or not math.isfinite(p) or not 0 <= p <= 1
-                                   for p in probs.values()) or abs(sum(probs.values()) - 1) > 1e-6):
-                        raise ValidationError("Invalid label scores")
+                if row.get("custom_id") != uid or row.get("request_sha256") != requested.get(uid):
+                    raise ValidationError("Output does not answer the prepared request")
                 evidence = validate(row, w, config["schemas"][axis])
             except ValidationError as exc:
                 fail = {**base, "status": row.get("status"), "validation_error": str(exc)}
@@ -133,7 +133,7 @@ def reconcile(run, output_dirs, thresholds=None, near_miss_threshold=0.2):
                     unverified.append({**fail, "validation_status": "unverified_candidate",
                                        "segment_sources": w["segment_sources"]})
                 continue
-            p_yes = (row.get("label_probs") or {}).get("yes")
+            p_yes = (probs or {}).get("yes")
             ok = {**base, "validation_status": "validated", "evidence": evidence, "p_yes": p_yes,
                   "segment_sources": w["segment_sources"]}
             judgments.append(ok)

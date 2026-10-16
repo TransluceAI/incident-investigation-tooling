@@ -1,4 +1,4 @@
-"""Chat messages for one (window, axis) request. Shared by preparation and the runner.
+"""Chat messages for one (window, axis) request, written into requests.jsonl by preparation.
 
 Layout: system = shared core; user = shape note, evidence between a boundary
 tag, then the axis policy and question. Everything before the axis policy is

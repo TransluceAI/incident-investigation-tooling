@@ -1,7 +1,11 @@
-"""Build Items from an exported data root and write the inference manifest.
+"""Build Items from an exported data root and write inference requests.
 
 Every record ends in exactly one place: an Item, the Arquivo ledger, or a gap.
 coverage.jsonl and gaps.jsonl make that accounting auditable.
+
+requests.jsonl holds one self-contained request per (window, axis) for the
+shared inference runner (inference/qwen, REQUESTS.md): finished messages, the
+axis schema and logprob options. engine.json is the runner profile for the run.
 """
 import contextlib
 import json
@@ -14,9 +18,11 @@ from . import arquivo_ledger, benchmark, controls, records, shapes
 from .common import atomic_write_text, sha256_file, sha256_text, write_jsonl, classifier_hash
 from .prompts import load_prompts, messages, schemas
 from .render import render_citable, windows
-from .schemas import AXES
+from .schemas import AXES, citation_schema
 
 VERSION = "screening-judge-v1"
+# Profile keys the judge consumes; the runner receives only engine/sampling settings.
+NOT_FOR_RUNNER = {"system_prompt", "schema", "citation_constraints", "token_count_mode"}
 
 
 class Corpus:
@@ -160,15 +166,22 @@ def item_bodies(item, corpus, gaps):
     return out
 
 
-def prepare(data_root, out, count, window_tokens, config_template, config_dir=None, with_controls=True, shards=1, benchmark_manifest=None):
+def prepare(data_root, out, count, window_tokens, config_template, config_dir=None, with_controls=True, shards=1,
+            benchmark_manifest=None, label_logprobs=10):
     if window_tokens <= 0 or type(shards) is not int or shards < 1:
         raise ValueError("window_tokens and shards must be positive")
+    if type(label_logprobs) is not int or not 0 <= label_logprobs <= 20:
+        raise ValueError("label_logprobs must be an integer from 0 to 20")
+    if "label_logprobs" in config_template:
+        raise ValueError("Set label scores with --label-logprobs; runner profiles do not carry label_logprobs")
+    if type(config_template.get("citation_constraints", False)) is not bool:
+        raise ValueError("citation_constraints must be true or false")
     out = Path(out)
     out.mkdir(parents=True, exist_ok=False)
     corpus, gaps = Corpus(data_root), []
     config = {**config_template, "version": VERSION, "prompts": load_prompts(config_dir) if config_dir else load_prompts(),
               "schemas": schemas(), "boundary_salt": secrets.token_hex(16),
-              "window_tokens": window_tokens,
+              "window_tokens": window_tokens, "label_logprobs": label_logprobs,
               "preparation_implementation": {
                   name: sha256_file(Path(__file__).with_name(name + ".py"))
                   for name in ("arquivo_ledger", "benchmark", "common", "controls", "decode", "prepare",
@@ -180,15 +193,15 @@ def prepare(data_root, out, count, window_tokens, config_template, config_dir=No
         write_jsonl(out / "gaps.jsonl", gaps)
         raise ValueError("No judgeable records found; refusing an empty corpus run")
     coverage, n_windows = [], 0
-    with jsonl_stream(out / "windows.jsonl") as put_window, jsonl_stream(out / "manifest.jsonl") as put_unit:
+    with jsonl_stream(out / "windows.jsonl") as put_window, jsonl_stream(out / "requests.jsonl") as put_request:
         for item in items:
             n_windows += _prepare_item(item, corpus, gaps, config, count, widest, window_tokens,
-                                       put_window, put_unit, coverage)
+                                       put_window, put_request, coverage)
         if with_controls:
             for item, bodies, _, _ in controls.control_items():
                 items.append(item)
                 n_windows += _prepare_item(item, corpus, gaps, config, count, widest, window_tokens,
-                                           put_window, put_unit, coverage, bodies)
+                                           put_window, put_request, coverage, bodies)
     item_rows = [{**{k: v for k, v in i.items() if k not in ("kinds", "time_basis")},
                   "kinds": sorted(i["kinds"]), "time_basis": sorted(i["time_basis"]),
                   "text_sha256s": sorted({d[1] or corpus.hashes.get(d[0]) for d in i["documents"]
@@ -197,6 +210,8 @@ def prepare(data_root, out, count, window_tokens, config_template, config_dir=No
     write_jsonl(out / "coverage.jsonl", coverage)
     write_jsonl(out / "gaps.jsonl", gaps)
     atomic_write_text(out / "config.json", json.dumps(config, ensure_ascii=False, indent=2) + "\n")
+    runner = {k: v for k, v in config_template.items() if k not in NOT_FOR_RUNNER}
+    atomic_write_text(out / "engine.json", json.dumps(runner, ensure_ascii=False, indent=2) + "\n")
     summary = {"version": VERSION, "items": len(items), "windows": n_windows,
                "requests": n_windows * len(AXES),
                "items_by_shape": dict(Counter(i["shape"] for i in items)),
@@ -207,25 +222,31 @@ def prepare(data_root, out, count, window_tokens, config_template, config_dir=No
                "config_sha256": sha256_file(out / "config.json"),
                "classifier_sha256": classifier_hash(config),
                "artifact_hashes": {name: sha256_file(out / name) for name in
-                                   ("manifest.jsonl", "windows.jsonl", "items.jsonl", "coverage.jsonl", "gaps.jsonl")}}
+                                   ("requests.jsonl", "engine.json", "windows.jsonl", "items.jsonl",
+                                    "coverage.jsonl", "gaps.jsonl")}}
     if shards > 1:
+        # part-N.jsonl is the runner launcher's --shard-dir naming. A window's three
+        # axis requests stay together and adjacent so they share the prefix cache.
         (out / "shards").mkdir()
         from .common import iter_jsonl
+        from itertools import groupby
         loads = [0] * shards
         with contextlib.ExitStack() as stack:
-            names = [f"shards/manifest-{i:04d}.jsonl" for i in range(shards)]
+            names = [f"shards/part-{i}.jsonl" for i in range(shards)]
             writers = [stack.enter_context(jsonl_stream(out / name)) for name in names]
-            for row in iter_jsonl(out / "manifest.jsonl"):
+            window = lambda row: row["custom_id"].rsplit(":", 1)[0]
+            for _, group in groupby(iter_jsonl(out / "requests.jsonl"), key=window):
                 worker = min(range(shards), key=lambda i: (loads[i], i))
-                writers[worker](row)
-                loads[worker] += len(row["text"])
+                for row in group:
+                    writers[worker](row)
+                    loads[worker] += sum(len(m["content"]) for m in row["body"]["messages"])
         summary["artifact_hashes"].update({name: sha256_file(out / name) for name in names})
         summary["shard_characters"] = loads
     atomic_write_text(out / "preparation.json", json.dumps(summary, indent=2) + "\n")
     return summary
 
 
-def _prepare_item(item, corpus, gaps, config, count, widest, window_tokens, put_window, put_unit, coverage,
+def _prepare_item(item, corpus, gaps, config, count, widest, window_tokens, put_window, put_request, coverage,
                   bodies=None):
     """Write one item's windows; return how many were written."""
     if bodies is None:
@@ -251,8 +272,13 @@ def _prepare_item(item, corpus, gaps, config, count, widest, window_tokens, put_
                     "segment_spans": spans, "source_offsets": offsets, "evidence_chunks": chunks,
                     "segment_sources": {s["segment_id"]: s["source"] for s in parts},
                     "segment_kinds": {s["segment_id"]: s["kind"] for s in parts}})
-        put_unit({"unit_id": wid, "chunk_idx": idx, "shape": item["shape"], "axes": list(AXES),
-                  "text": text, "text_sha256": digest})
+        for axis in AXES:
+            schema = citation_schema(axis, chunks) if config.get("citation_constraints") else config["schemas"][axis]
+            body = {"messages": messages(config, item["shape"], axis, text),
+                    "response_format": {"type": "json_schema", "json_schema": {"name": axis, "schema": schema}}}
+            if config["label_logprobs"]:
+                body.update(logprobs=True, top_logprobs=config["label_logprobs"])
+            put_request({"custom_id": f"{wid}:{axis}", "body": body})
     coverage.append({"item_id": item["item_id"], "status": "prepared", "windows": ids,
                      "segment_lengths": {s["segment_id"]: len(s["text"]) for s in segs}})
     return len(ids)

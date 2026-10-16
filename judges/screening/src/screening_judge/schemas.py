@@ -8,7 +8,9 @@ abstain value; likely/possible are derived later from calibrated probabilities.
 Only JSON-schema keywords already exercised with the cluster's vLLM grammar
 backend are used (type, enum, properties, required, additionalProperties,
 items, maxItems, maxLength, minimum). Non-empty and uniqueness rules are
-enforced by validate.py instead.
+enforced by validate.py instead. The opt-in citation_schema() adds anyOf,
+maximum and minItems, the shape the Arquivo GPU pilot exercised (vLLM 0.31.0,
+xgrammar 0.2.7).
 """
 AXES = ("hacking", "agentic_activity", "coordination")
 LABELS = ("yes", "no", "insufficient_evidence")
@@ -79,3 +81,27 @@ def schema(axis: str) -> dict:
               "missing_evidence": {"type": "array", "maxItems": 4, "items": _text(200)}}
     return {"$schema": "https://json-schema.org/draft/2020-12/schema", "type": "object",
             "additionalProperties": False, "required": list(props), "properties": props}
+
+
+def citation_schema(axis: str, chunks: dict) -> dict:
+    """schema(axis) narrowed to one window's citable chunks (opt-in citation_constraints).
+
+    Grammar decoding then cannot emit an unknown segment ID or an out-of-range
+    chunk number, and every action names at least one citable segment. The copy
+    only narrows schema(axis), so validation against schema(axis) and citation
+    resolution still apply unchanged.
+    """
+    narrowed = schema(axis)
+    props = narrowed["properties"]
+    citable = [(sid, len(entries)) for sid, entries in sorted(chunks.items()) if entries]
+    item = EVIDENCE["items"]
+    props["evidence"] = ({**EVIDENCE, "items": {"anyOf": [
+        {**item, "properties": {**item["properties"], "segment_id": {"type": "string", "enum": [sid]},
+                                "chunk_id": {"type": "integer", "minimum": 1, "maximum": n}}}
+        for sid, n in citable]}} if citable else {**EVIDENCE, "maxItems": 0})
+    if "actions" in props:
+        ids = {"type": "array", "minItems": 1, "maxItems": 4, "items": {"enum": [sid for sid, _ in citable]}}
+        props["actions"] = ({**props["actions"], "items": {**ACTION, "properties": {
+            **ACTION["properties"], "evidence_segment_ids": ids}}} if citable
+            else {**props["actions"], "maxItems": 0})
+    return narrowed
