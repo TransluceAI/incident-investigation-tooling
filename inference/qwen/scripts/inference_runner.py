@@ -630,7 +630,7 @@ def run(resources):
                         answer, output.prompt_token_ids, count, tokenizer, validator_for(row), enabled)
                     status = 'failed' if error else 'success'
                     if 'body' in row:
-                        # Request rows use the batch-result shape (REQUESTS.md).
+                        # Request rows use the batch-result shape (README.md#result-rows).
                         result = {'run_identity': identity, 'unit_id': row['unit_id'],
                                   'custom_id': row['custom_id'], 'request_sha256': row['request_sha256'],
                                   # The rejected answer stays in content and raw_output.
