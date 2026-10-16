@@ -131,9 +131,13 @@ def main():
             shutil.copyfile(RELEASE/'scripts/run.sbatch', run/'run.sbatch')
             (run/'python.txt').write_text(str(python)+'\n')
             (run/'inputs.txt').write_text(''.join(str(path)+'\n' for path in paths))
+            # A release built by build_release.sh records its commit; keep it with the run.
+            saved = ['config.json','inference_runner.py','run.sbatch','inputs.txt','python.txt']
+            if (RELEASE/'RELEASE').is_file():
+                shutil.copyfile(RELEASE/'RELEASE', run/'release.txt')
+                saved.append('release.txt')
             hashes = {str(path): sha(path) for path in paths}
-            hashes.update({str(run/name):sha(run/name)
-                           for name in ['config.json','inference_runner.py','run.sbatch','inputs.txt','python.txt']})
+            hashes.update({str(run/name):sha(run/name) for name in saved})
             (run/'hashes.json').write_text(json.dumps(hashes,indent=2)+'\n')
         hashes = json.loads((run/'hashes.json').read_text())
         if any(sha(path) != expected for path,expected in hashes.items()):

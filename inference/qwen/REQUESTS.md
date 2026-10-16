@@ -44,16 +44,24 @@ with sorted keys, `(',', ':')` separators and non-ASCII characters unescaped
 Resume compares that hash, so a changed request cannot reuse an earlier answer,
 and applications can recompute it to bind each result to the request they wrote. Keep requests that
 share a long prefix adjacent in the file so they share a batch and vLLM's prefix
-cache. `citation_constraints` applies to text rows only; an application that
-wants narrowed citations writes the narrowed schema into each request.
+cache. An application that wants narrowed citations writes the narrowed schema into
+each request. Putting the schema and field instructions in the prompt as well is
+recommended by vLLM's structured-output guide; that is also the application's job.
 
 ## Result rows
 
-Workers write `outputs/worker-<id>/part-*.jsonl`. Request results carry
-`custom_id`, `request_sha256`, `status` (`success`/`failed`), `result` (parsed JSON
-or null), `error`, `raw_output`, `reasoning`, `final_output`, token counts and
-`finish_reason`, plus `attempt`/`previous_attempts` when retries are configured.
-`unit_id` equals `custom_id`.
+Workers write `outputs/worker-<id>/part-*.jsonl`. Request results carry:
+
+- `custom_id`, `request_sha256`, `status` (`success`/`failed`), `error`;
+- `result`: the parsed JSON, or null on failure;
+- `content`: the final answer text; `reasoning` and `reasoning_complete` with thinking on;
+- `finish_reason` and `usage: {prompt_tokens, completion_tokens, reasoning_tokens, final_tokens}`;
+- `attempts`: every attempt in order, the committed one last, each with `attempt`,
+  `error`, `finish_reason` and `output_tokens`; earlier attempts also keep `raw_output`;
+- `raw_output` (full generated text), `utc`, `run_identity`, and `unit_id` (equals `custom_id`);
+- `thinking_budget_exhausted` when a thinking budget is configured.
+
+Only format failures are retried, and only when `retry` is configured.
 
 When a request asked for logprobs, a successful row also has
 `logprobs: {"content": [{"token", "logprob", "top_logprobs": [{"token", "logprob"}]}]}`

@@ -260,15 +260,20 @@ def decoding_controls(config):
             raise ValueError('thinking_token_budget must be a positive integer below max_tokens')
         if 'reasoning_config' not in config['engine']:
             raise ValueError('thinking_token_budget requires engine.reasoning_config')
-    citations = config.get('citation_constraints', False)
-    if type(citations) is not bool:
-        raise ValueError('citation_constraints must be true or false')
+    if 'citation_constraints' in config:
+        raise ValueError('citation_constraints moved to applications: write a narrowed schema into each request')
     retry = config.get('retry')
-    if retry is not None and (not isinstance(retry, dict) or set(retry) != {'max_attempts'}
+    if retry is not None and (not isinstance(retry, dict) or 'max_attempts' not in retry
+                              or set(retry) - {'max_attempts', 'temperatures'}
                               or type(retry['max_attempts']) is not int or retry['max_attempts'] < 1):
-        raise ValueError('retry must be {"max_attempts": <positive integer>}')
-    return {'citations': citations, 'attempts': retry['max_attempts'] if retry else 1,
-            'budget': budget}
+        raise ValueError('retry must be {"max_attempts": <positive integer>, "temperatures": [...]?}')
+    temperatures = (retry or {}).get('temperatures')
+    if temperatures is not None and (
+            not isinstance(temperatures, list) or len(temperatures) != retry['max_attempts'] - 1
+            or any(type(t) not in (int, float) or not 0 <= t <= 2 for t in temperatures)):
+        raise ValueError('retry.temperatures needs one temperature (0-2) per retry: max_attempts - 1 values')
+    return {'attempts': retry['max_attempts'] if retry else 1, 'budget': budget,
+            'temperatures': temperatures}
 
 
 def check_reasoning_end(config, tokenizer):
@@ -287,67 +292,6 @@ def check_reasoning_end(config, tokenizer):
             raise ValueError('reasoning_end_str must end with a single </think> token')
         if budget is not None and budget + len(ids) >= config['sampling']['max_tokens']:
             raise ValueError('thinking_token_budget plus reasoning_end_str must leave room for final JSON')
-
-
-def citation_schema(schema, row):
-    """Per-unit copy of the schema whose citations can name only this unit's chunks.
-
-    Under grammar-constrained decoding the model then cannot emit a miscopied
-    segment ID or an out-of-range chunk number, and reference arrays name at least
-    one known segment. Original field constraints remain in the narrowed schema;
-    application-level evidence validation is still the caller's responsibility.
-    """
-    chunks = row.get('evidence_chunks')
-    if not isinstance(chunks, dict) or not chunks:
-        raise ValueError(f'citation_constraints need evidence_chunks: {row["unit_id"]}')
-    if any(not isinstance(sid, str) or not sid or not isinstance(entries, list)
-           for sid, entries in chunks.items()):
-        raise ValueError('evidence_chunks must map nonempty segment IDs to chunk lists')
-    counts = {sid: len(entries) for sid, entries in sorted(chunks.items())}
-    citable = [(sid, n) for sid, n in counts.items() if n]
-    if not citable:
-        raise ValueError(f'No citable chunks: {row["unit_id"]}')
-    found = set()
-
-    def restrict_enum(original, allowed):
-        if not isinstance(original, dict):
-            raise ValueError('Citation fields require object-form schemas')
-        values = [value for value in allowed
-                  if 'enum' not in original or value in original['enum']]
-        return {**original, 'enum': values}
-
-    def narrow(node):
-        if isinstance(node, list):
-            return [narrow(x) for x in node]
-        if not isinstance(node, dict):
-            return node
-        node = {k: narrow(v) for k, v in node.items()}
-        props = node.get('properties')
-        if not isinstance(props, dict):
-            return node
-        if 'segment_id' in props and 'chunk_id' in props:
-            found.add('citation')
-            chunk = props['chunk_id']
-            if not isinstance(chunk, dict) or chunk.get('type') != 'integer':
-                raise ValueError('Citation chunk_id must have an integer schema')
-            return {'anyOf': [{**node, 'properties': {
-                **props, 'segment_id': restrict_enum(props['segment_id'], [sid]),
-                'chunk_id': {**chunk, 'minimum': max(1, chunk.get('minimum', 1)),
-                            'maximum': min(n, chunk.get('maximum', n))}}}
-                for sid, n in citable]}
-        if 'evidence_ids' in props:
-            ids = props['evidence_ids']
-            if not isinstance(ids, dict) or ids.get('type') != 'array':
-                raise ValueError('Citation evidence_ids must have an array schema')
-            node['properties'] = {**props, 'evidence_ids': {
-                **ids, 'minItems': max(1, ids.get('minItems', 1)),
-                'items': restrict_enum(ids.get('items', {}), list(counts))}}
-        return node
-
-    narrowed = narrow(schema)
-    if not found:
-        raise ValueError('citation_constraints need a schema citation with segment_id and chunk_id')
-    return narrowed
 
 
 def thinking_tokens(tokenizer):
@@ -391,6 +335,23 @@ def split_answer(answer, tokenizer, enabled):
             'reasoning_complete': True}
 
 
+TRUNCATION = ('Nonterminal/length finish', 'Reasoning ended without </think>')
+
+
+class Failure(str):
+    """Error text that also says whether it is a format failure (retryable)."""
+    retryable = False
+
+
+def failure(exc):
+    text = Failure(f'{type(exc).__name__}: {exc}')
+    # Invalid JSON, schema violations and truncation are format failures. Engine or
+    # template mismatches and reasoning-boundary anomalies are not retried.
+    text.retryable = (isinstance(exc, json.JSONDecodeError) or type(exc).__name__ == 'ValidationError'
+                      or str(exc).startswith(TRUNCATION))
+    return text
+
+
 def validate_answer(answer, prompt_ids, expected_tokens, tokenizer, validator, enabled):
     parsed = None
     fields = {'reasoning': None, 'final_output': None, 'reasoning_tokens': None,
@@ -410,8 +371,23 @@ def validate_answer(answer, prompt_ids, expected_tokens, tokenizer, validator, e
         validator.validate(parsed)
     except Exception as exc:
         # Legacy failures retain parsed JSON for inspection; status stays failed.
-        return parsed if not enabled else None, f'{type(exc).__name__}: {exc}', fields
+        return parsed if not enabled else None, failure(exc), fields
     return parsed, None, fields
+
+
+def budget_exhausted(answer, fields, budget, end_ids, start):
+    """True when vLLM forced the closing string after a full reasoning budget.
+
+    reasoning_tokens counts the closing </think> (and a generated opener), so a
+    natural stop on the last budgeted token is not a cap. A bare '</think>' end
+    string cannot be told apart from such a natural stop.
+    """
+    n = fields['reasoning_tokens']
+    if not fields['reasoning_complete'] or not n:
+        return False
+    ids = list(answer.token_ids)[:n]
+    opener = 1 if ids[0] == start else 0
+    return ids[-len(end_ids):] == end_ids and n - opener - len(end_ids) >= budget
 
 
 def batches(rows, tokenizer, config, skip):
@@ -421,8 +397,6 @@ def batches(rows, tokenizer, config, skip):
             if fingerprint(row) != fingerprint(skip[row['unit_id']]):
                 raise ValueError('Committed input hash does not match input')
             continue
-        if 'body' in row and config.get('citation_constraints'):
-            raise ValueError('citation_constraints apply to text rows; narrow citations in the request schema')
         chat = messages(row, config)
         ids = tokenizer.apply_chat_template(chat, tokenize=True, return_dict=False, add_generation_prompt=True,
                                             **config['chat_template_kwargs'])
@@ -447,6 +421,28 @@ def batches(rows, tokenizer, config, skip):
         count += tokens
     if batch:
         yield batch
+
+
+def token_counts(row):
+    """(input, output, reasoning, final) tokens for a text or request result row."""
+    if 'usage' in row:
+        u = row['usage']
+        return u['prompt_tokens'], u['completion_tokens'], u['reasoning_tokens'], u['final_tokens']
+    return row['input_tokens'], row['output_tokens'], row['reasoning_tokens'], row['final_tokens']
+
+
+def token_totals(rows):
+    counts = [token_counts(r) for r in rows]
+    return {'input_tokens': sum(c[0] for c in counts), 'output_tokens': sum(c[1] for c in counts),
+            'reasoning_tokens': sum(c[2] or 0 for c in counts), 'final_tokens': sum(c[3] or 0 for c in counts),
+            'unclassified_tokens': sum(c[1] for c in counts if c[2] is None)}
+
+
+def earlier_attempts(row):
+    """Attempts before the committed one (retries only)."""
+    if 'attempts' in row:
+        return row['attempts'][:-1]
+    return row.get('previous_attempts', [])
 
 
 def metrics_snapshot(llm):
@@ -514,14 +510,17 @@ def run(resources):
                                               trust_remote_code=False)
     # Validate every selected unit before instantiating a GPU model.
     check_reasoning_end(config, tokenizer)
+    end_ids = start_id = None
+    if controls['budget'] is not None:
+        end_str = (config['engine'].get('reasoning_config') or {}).get('reasoning_end_str') or '</think>'
+        end_ids = tokenizer.encode(end_str, add_special_tokens=False)
+        start_id = thinking_tokens(tokenizer)[0]
     input_info = {r['unit_id']: fingerprint(r) for r in units(args.fixtures, args.max_records)}
-    per_unit = controls['citations'] or any('body' in r for r in units(args.fixtures, 1))
+    per_unit = any('body' in r for r in units(args.fixtures, 1))
     legacy = not per_unit and controls['attempts'] == 1
     for batch in batches(units(args.fixtures, args.max_records), tokenizer, config, {}):
         for row, _, _ in batch:
             validator_for(row)
-            if controls['citations']:
-                Draft202012Validator.check_schema(citation_schema(config['schema'], row))
     if args.validate_only:
         print(json.dumps({'event': 'validated', 'units': len(input_info), 'identity': identity}), flush=True)
         return
@@ -579,11 +578,14 @@ def run(resources):
 
         def sampling_for(row, attempt):
             kwargs = dict(base_sampling)
-            # A retry with an explicit sampling seed draws a new sample; greedy
-            # retries may produce the same answer; recovery is not guaranteed.
+            # A retry with an explicit sampling seed draws a new sample, and an optional
+            # schedule raises the temperature per retry (olmOCR-style): greedy retries
+            # may repeat the same answer, so recovery is not guaranteed.
             if attempt > 1 and type(kwargs.get('seed')) is int:
                 kwargs['seed'] += attempt - 1
-            schema = citation_schema(config['schema'], row) if controls['citations'] else row_schema(row, config)
+            if attempt > 1 and controls['temperatures']:
+                kwargs['temperature'] = controls['temperatures'][attempt - 2]
+            schema = row_schema(row, config)
             k = top_logprobs(row)
             if k is not None:
                 kwargs['logprobs'] = k
@@ -626,30 +628,48 @@ def run(resources):
                     answer = output.outputs[0]
                     parsed, error, answer_fields = validate_answer(
                         answer, output.prompt_token_ids, count, tokenizer, validator_for(row), enabled)
-                    source = ({'custom_id': row['custom_id'], 'request_sha256': row['request_sha256']}
-                              if 'body' in row else
-                              {'text_sha256': row['text_sha256'], 'chunk_idx': row['chunk_idx']})
-                    result = {'run_identity': identity, 'unit_id': row['unit_id'], **source,
-                              'status': 'failed' if error else 'success', 'result': parsed,
-                              'error': error, 'raw_output': answer.text,
-                              **answer_fields,
-                              'input_tokens': count, 'output_tokens': len(answer.token_ids),
-                              'finish_reason': answer.finish_reason, 'utc': now()}
+                    status = 'failed' if error else 'success'
+                    if 'body' in row:
+                        # Request rows use the batch-result shape (REQUESTS.md).
+                        result = {'run_identity': identity, 'unit_id': row['unit_id'],
+                                  'custom_id': row['custom_id'], 'request_sha256': row['request_sha256'],
+                                  'status': status, 'result': parsed, 'error': error,
+                                  'content': answer_fields['final_output'],
+                                  'reasoning': answer_fields['reasoning'],
+                                  'reasoning_complete': answer_fields['reasoning_complete'],
+                                  'finish_reason': answer.finish_reason,
+                                  'usage': {'prompt_tokens': count, 'completion_tokens': len(answer.token_ids),
+                                            'reasoning_tokens': answer_fields['reasoning_tokens'],
+                                            'final_tokens': answer_fields['final_tokens']},
+                                  'raw_output': answer.text, 'utc': now()}
+                    else:
+                        result = {'run_identity': identity, 'unit_id': row['unit_id'],
+                                  'text_sha256': row['text_sha256'], 'chunk_idx': row['chunk_idx'],
+                                  'status': status, 'result': parsed,
+                                  'error': error, 'raw_output': answer.text,
+                                  **answer_fields,
+                                  'input_tokens': count, 'output_tokens': len(answer.token_ids),
+                                  'finish_reason': answer.finish_reason, 'utc': now()}
                     if top_logprobs(row) is not None:
                         result['logprobs'] = (None if error else
                                               final_logprobs(answer, answer_fields['reasoning_tokens'] or 0))
                     if controls['budget'] is not None:
-                        # Natural reasoning cannot exceed the budget, so more tokens
-                        # mean vLLM forced the end string.
-                        result['thinking_budget_exhausted'] = (answer_fields['reasoning_tokens'] or 0) > controls['budget']
-                    if controls['attempts'] > 1:
+                        result['thinking_budget_exhausted'] = budget_exhausted(
+                            answer, answer_fields, controls['budget'], end_ids, start_id)
+                    if 'body' in row:
+                        # Every attempt, the committed one last.
+                        result['attempts'] = list(history.get(i, ())) + [{
+                            'attempt': attempt, 'error': error, 'finish_reason': answer.finish_reason,
+                            'output_tokens': len(answer.token_ids)}]
+                    elif controls['attempts'] > 1:
                         result['attempt'] = attempt
                         result['previous_attempts'] = list(history.get(i, ()))
                     results[i] = result
-                    if error and attempt < controls['attempts']:
+                    if error and error.retryable and attempt < controls['attempts']:
                         history.setdefault(i, []).append({'attempt': attempt, 'error': error,
                                                           'finish_reason': answer.finish_reason,
-                                                          'output_tokens': len(answer.token_ids)})
+                                                          'output_tokens': len(answer.token_ids),
+                                                          'raw_output': answer.text})
                         retry.append(i)
                 pending = retry
                 if not pending:
@@ -663,17 +683,12 @@ def run(resources):
             progress = {'utc': now(), 'committed': len(done), 'expected': len(input_info),
                         'failed': sum(r['status'] != 'success' for r in done.values()),
                         'batch_units': len(batch), 'batch_seconds': time.monotonic()-begin,
-                        'batch_input_tokens': sum(r['input_tokens'] for r in results),
-                        'batch_output_tokens': sum(r['output_tokens'] for r in results),
-                        'batch_reasoning_tokens': sum(r['reasoning_tokens'] or 0 for r in results),
-                        'batch_final_tokens': sum(r['final_tokens'] or 0 for r in results),
-                        'batch_unclassified_tokens': sum(r['output_tokens'] for r in results
-                                                         if r['reasoning_tokens'] is None),
+                        **{f'batch_{k}': v for k, v in token_totals(results).items()},
                         'metrics': metrics}
             if controls['attempts'] > 1:
-                progress['batch_retried_units'] = sum(bool(r['previous_attempts']) for r in results)
+                progress['batch_retried_units'] = sum(bool(earlier_attempts(r)) for r in results)
                 progress['batch_retry_output_tokens'] = sum(a['output_tokens'] for r in results
-                                                            for a in r['previous_attempts'])
+                                                            for a in earlier_attempts(r))
             write_json(directory / 'progress.json', progress)
             with open(directory / 'timings.jsonl', 'a') as stream:
                 stream.write(json.dumps(progress)+'\n')
@@ -684,18 +699,14 @@ def run(resources):
              'committed': len(done), 'unfinished': len(input_info)-len(done),
              'failed': sum(r['status'] != 'success' for r in done.values()),
              'enable_thinking': enabled,
-             'output_tokens': sum(r.get('output_tokens', 0) for r in done.values()),
-             'reasoning_tokens': sum(r.get('reasoning_tokens') or 0 for r in done.values()),
-             'final_tokens': sum(r.get('final_tokens') or 0 for r in done.values()),
-             'unclassified_tokens': sum(r.get('output_tokens', 0) for r in done.values()
-                                        if r.get('reasoning_tokens') is None),
+             **{k: v for k, v in token_totals(done.values()).items() if k != 'input_tokens'},
              'session_seconds': time.monotonic()-started,
              'metrics': metrics_snapshot(llm) if llm else None}
     if controls['attempts'] > 1:
         # Committed output_tokens count final attempts only; earlier attempts are listed here.
-        final['retried_units'] = sum(bool(r.get('previous_attempts')) for r in done.values())
+        final['retried_units'] = sum(bool(earlier_attempts(r)) for r in done.values())
         final['retry_output_tokens'] = sum(a['output_tokens'] for r in done.values()
-                                           for a in r.get('previous_attempts', ()))
+                                           for a in earlier_attempts(r))
     write_json(directory / 'summary.json', final)
     print(json.dumps({'event': 'finished', **final}), flush=True)
     if final['unfinished'] or final['failed']:

@@ -80,17 +80,12 @@ class RequestRowTests(unittest.TestCase):
             with self.subTest(rows=rows), self.assertRaises(ValueError):
                 list(r.units(self.manifest(rows)))
 
-    def test_schema_falls_back_to_config_and_citations_need_text_rows(self):
+    def test_schema_falls_back_to_config(self):
         body = {'messages': [{'role': 'user', 'content': 'x'}]}
         unit, = r.units(self.manifest([{'custom_id': 'a', 'body': body}]))
         self.assertEqual(r.row_schema(unit, {'schema': OTHER}), OTHER)
         with self.assertRaisesRegex(ValueError, 'No response_format'):
             r.row_schema(unit, {})
-        cfg = {'citation_constraints': True, 'chat_template_kwargs': {'enable_thinking': False},
-               'sampling': {'max_tokens': 10}, 'engine': {'max_model_len': 1000},
-               'host_batch_tokens': 1000, 'host_batch_records': 2}
-        with self.assertRaisesRegex(ValueError, 'citation_constraints'):
-            list(r.batches(iter([unit]), FakeTokenizer(), cfg, {}))
 
     def test_final_logprobs_cover_only_the_answer_and_never_invent_values(self):
         lp = lambda token, value, rank: SimpleNamespace(decoded_token=token, logprob=value, rank=rank)
@@ -170,7 +165,12 @@ class RequestRowTests(unittest.TestCase):
         self.assertEqual([o['custom_id'] for o in out], ['w0:hacking', 'w0:coordination'])
         self.assertEqual([o['status'] for o in out], ['success', 'failed'])
         self.assertEqual(out[0]['request_sha256'], r.request_hash(rows[0]['body']))
-        self.assertFalse({'text_sha256', 'chunk_idx'} & set(out[0]))
+        self.assertFalse({'text_sha256', 'chunk_idx', 'final_output', 'input_tokens'} & set(out[0]))
+        self.assertEqual(out[0]['content'], '{"label":"yes"}')
+        self.assertEqual(out[0]['usage'], {'prompt_tokens': len('first'), 'completion_tokens': 15,
+                                           'reasoning_tokens': 0, 'final_tokens': 15})
+        self.assertEqual(out[1]['attempts'], [{'attempt': 1, 'error': out[1]['error'],
+                                               'finish_reason': 'stop', 'output_tokens': 15}])
         content = out[0]['logprobs']['content']
         self.assertEqual(''.join(c['token'] for c in content), '{"label":"yes"}')
         self.assertEqual(len(content[0]['top_logprobs']), 2)

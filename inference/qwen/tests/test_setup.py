@@ -72,6 +72,20 @@ class SubmissionTests(unittest.TestCase):
         self.assertEqual(call.call_args.args[0][-2], sys.executable)
         self.assertEqual((self.run / 'config.json').read_text(), '{}\n')
 
+    def test_release_commit_is_recorded_with_the_run(self):
+        self.fresh()
+        self.assertFalse((self.run / 'release.txt').exists())  # working-tree launcher: no release
+        release = self.root / 'release'
+        (release / 'scripts').mkdir(parents=True)
+        for name in ('inference_runner.py', 'run.sbatch'):
+            (release / 'scripts' / name).write_bytes((ROOT / 'scripts' / name).read_bytes())
+        (release / 'RELEASE').write_text('a' * 40 + '\n')
+        self.run = self.root / 'run-release'
+        with patch.object(submit, 'RELEASE', release):
+            self.fresh()
+        self.assertEqual((self.run / 'release.txt').read_text(), 'a' * 40 + '\n')
+        self.assertIn(str(self.run / 'release.txt'), json.loads((self.run / 'hashes.json').read_text()))
+
     def test_resume_rejects_changed_files_active_jobs_and_unknown_submission(self):
         self.fresh()
         with self.assertRaises(SystemExit):

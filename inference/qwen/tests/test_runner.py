@@ -292,66 +292,28 @@ class DecodingControlTests(unittest.TestCase):
                         'evidence_ids': {'type': 'array', 'items': {'type': 'string'}}},
                     'required': ['evidence_ids'], 'additionalProperties': False}}},
             'required': ['evidence', 'references'], 'additionalProperties': False}
-        self.row = {'unit_id': 'e:w0', 'evidence_chunks': {'e:0': [{}, {}], 'e:1': [{}], 'e:2': []}}
+        self.row = {'unit_id': 'e:w0'}
         self.cfg = {'chat_template_kwargs': {'enable_thinking': True},
                     'engine': {'max_model_len': 20000,
                                'reasoning_config': {'reasoning_end_str': 'Answer now.\n</think>'}},
                     'sampling': {'max_tokens': 16384, 'thinking_token_budget': 14336,
                                  'repetition_detection': {'max_pattern_size': 256, 'min_pattern_size': 8,
                                                           'min_count': 8}},
-                    'citation_constraints': True, 'retry': {'max_attempts': 2}}
+                    'retry': {'max_attempts': 2}}
 
     def result(self, evidence=(), action_ids=None):
         return {'evidence': [{'segment_id': s, 'chunk_id': c} for s, c in evidence],
                 'references': [] if action_ids is None else [{'evidence_ids': action_ids}]}
 
 
-    def test_citation_schema_admits_only_supplied_chunks_and_segments(self):
-        from jsonschema import Draft202012Validator
-        original = json.dumps(self.schema, sort_keys=True)
-        narrowed = Draft202012Validator(r.citation_schema(self.schema, self.row))
-        saved = Draft202012Validator(self.schema)
-        self.assertEqual(json.dumps(self.schema, sort_keys=True), original)
-        valid = self.result([('e:0', 2), ('e:1', 1)], action_ids=['e:2'])
-        self.assertTrue(narrowed.is_valid(valid) and saved.is_valid(valid))
-        # Each invalid reference is valid under the saved schema but not the narrowed one.
-        for bad in (self.result([('e:00', 1)]), self.result([('e', 1)]), self.result([('e:0', 3)]),
-                    self.result([('e:2', 1)]), self.result(action_ids=[]), self.result(action_ids=['e:9'])):
-            with self.subTest(bad=bad['evidence'] or bad['references']):
-                self.assertTrue(saved.is_valid(bad))
-                self.assertFalse(narrowed.is_valid(bad))
-
-    def test_citation_schema_requires_chunk_map_and_citation_fields(self):
-        for row in ({'unit_id': 'u'}, {'unit_id': 'u', 'evidence_chunks': {'e:0': []}}):
-            with self.assertRaises(ValueError):
-                r.citation_schema(self.schema, row)
-        with self.assertRaisesRegex(ValueError, 'segment_id and chunk_id'):
-            r.citation_schema({'type': 'object', 'properties': {'quote': {'type': 'string'}}}, self.row)
-
-    def test_citation_narrowing_preserves_existing_constraints(self):
-        from jsonschema import Draft202012Validator
-        citation = self.schema['properties']['evidence']['items']['properties']
-        citation['segment_id']['enum'] = ['e:0']
-        citation['chunk_id']['maximum'] = 1
-        references = self.schema['properties']['references']['items']['properties']['evidence_ids']
-        references.update(minItems=2, items={'enum': ['e:0']})
-        narrowed = Draft202012Validator(r.citation_schema(self.schema, self.row))
-        self.assertTrue(narrowed.is_valid(self.result([('e:0', 1)], ['e:0', 'e:0'])))
-        for value in (self.result([('e:1', 1)]), self.result([('e:0', 2)]),
-                      self.result(action_ids=['e:0']), self.result(action_ids=['e:1', 'e:1'])):
-            self.assertFalse(narrowed.is_valid(value))
-
-    def test_citation_chunk_map_requires_lists_and_nonempty_ids(self):
-        for chunks in ({'a': 'text'}, {'': [{}]}, {1: [{}]}):
-            with self.assertRaisesRegex(ValueError, 'chunk lists'):
-                r.citation_schema(self.schema, {'unit_id': 'u', 'evidence_chunks': chunks})
-
     def test_controls_are_validated_and_absent_controls_are_legacy(self):
-        self.assertEqual(r.decoding_controls(self.cfg), {'citations': True, 'attempts': 2, 'budget': 14336})
+        self.assertEqual(r.decoding_controls(self.cfg), {'attempts': 2, 'budget': 14336, 'temperatures': None})
         self.assertEqual(r.engine_options(self.cfg)['reasoning_config'],
                          {'reasoning_end_str': 'Answer now.\n</think>', 'reasoning_parser': 'qwen3'})
         legacy = {'chat_template_kwargs': {'enable_thinking': False}, 'engine': {}, 'sampling': {'max_tokens': 10}}
-        self.assertEqual(r.decoding_controls(legacy), {'citations': False, 'attempts': 1, 'budget': None})
+        self.assertEqual(r.decoding_controls(legacy), {'attempts': 1, 'budget': None, 'temperatures': None})
+        self.assertEqual(r.decoding_controls({**self.cfg, 'retry': {'max_attempts': 3, 'temperatures': [0.2, 0.5]}}),
+                         {'attempts': 3, 'budget': 14336, 'temperatures': [0.2, 0.5]})
         self.assertEqual(r.engine_options(legacy), {})
         for path, value in ((('sampling', 'thinking_token_budget'), 16384),
                             (('sampling', 'thinking_token_budget'), 0),
@@ -363,8 +325,12 @@ class DecodingControlTests(unittest.TestCase):
                             (('sampling', 'repetition_detection'), {'max_pattern_size': 8, 'min_count': 1}),
                             (('sampling', 'n'), 2),
                             (('sampling', 'n'), True),
-                            (('citation_constraints',), 'yes'),
+                            (('citation_constraints',), True),  # applications narrow citations
+                            (('citation_constraints',), False),
                             (('retry',), {'max_attempts': 0}),
+                            (('retry',), {'temperatures': []}),
+                            (('retry',), {'max_attempts': 2, 'temperatures': [0.2, 0.5]}),
+                            (('retry',), {'max_attempts': 2, 'temperatures': [3]}),
                             (('retry',), {'max_attempts': 2, 'reask': True})):
             with self.subTest(path=path, value=value):
                 cfg = json.loads(json.dumps(self.cfg))
@@ -389,10 +355,41 @@ class DecodingControlTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'Qwen3 parser'):
             r.engine_options(cfg)
 
+    def test_only_format_failures_are_retryable(self):
+        from jsonschema import ValidationError
+        cases = ((json.JSONDecodeError('Expecting value', '', 0), True),
+                 (ValidationError('bad'), True),
+                 (ValueError('Nonterminal/length finish: length'), True),
+                 (ValueError('Nonterminal/length finish: repetition'), True),
+                 (ValueError('Reasoning ended without </think>; final JSON unavailable'), True),
+                 (ValueError('Rendered token count differs from engine input'), False),
+                 (ValueError('Unexpected nested reasoning block'), False))
+        for exc, retryable in cases:
+            with self.subTest(exc=exc):
+                error = r.failure(exc)
+                self.assertEqual(error.retryable, retryable)
+                self.assertEqual(error, f'{type(exc).__name__}: {exc}')  # error text is unchanged
+
+    def test_budget_exhaustion_needs_the_forced_closing_string_after_a_full_budget(self):
+        tokenizer, budget = EndTokenizer(), 5
+        end_ids = tokenizer.encode('Answer now.\n</think>')
+
+        def exhausted(ids):
+            answer = SimpleNamespace(token_ids=ids + tokenizer.encode('{}'), text='', finish_reason='stop')
+            return r.budget_exhausted(answer, r.split_answer(answer, tokenizer, True), budget, end_ids, 1)
+
+        natural = tokenizer.encode('x' * budget) + [2]  # ends on its last budgeted token
+        self.assertFalse(exhausted(natural))
+        self.assertFalse(exhausted(tokenizer.encode('Answer now.\n') + [2]))  # phrase, short reasoning
+        self.assertTrue(exhausted(tokenizer.encode('x' * budget + 'Answer now.\n') + [2]))
+        self.assertTrue(exhausted([1] + tokenizer.encode('x' * budget + 'Answer now.\n') + [2]))
+        answer = SimpleNamespace(token_ids=tokenizer.encode('x' * 50), text='', finish_reason='length')
+        self.assertFalse(r.budget_exhausted(answer, r.split_answer(answer, tokenizer, True), budget, end_ids, 1))
+
     def test_controls_example_config_is_valid(self):
         path = Path(__file__).resolve().parents[1] / 'config/qwen3.8-27b-fp8.thinking.controls.json'
         cfg = json.loads(path.read_text())
-        self.assertEqual(r.decoding_controls(cfg), {'citations': False, 'attempts': 2, 'budget': 14336})
+        self.assertEqual(r.decoding_controls(cfg), {'attempts': 2, 'budget': 14336, 'temperatures': None})
         self.assertEqual(r.engine_options(cfg)['reasoning_config']['reasoning_parser'], 'qwen3')
         r.check_reasoning_end(cfg, EndTokenizer())
 
@@ -449,7 +446,7 @@ class DecodingControlTests(unittest.TestCase):
                 return [SimpleNamespace(
                     prompt_token_ids=tokenizer.apply_chat_template(chat, **kwargs['chat_template_kwargs']),
                     outputs=[answer(finish='repetition') if first and i == 0 else
-                             answer(reasoning='x' * 14400) if not first else answer()])
+                             answer(reasoning='x' * 14336 + 'Answer now.\n') if not first else answer()])
                     for i, chat in enumerate(chats)]
 
         modules = {
@@ -462,7 +459,8 @@ class DecodingControlTests(unittest.TestCase):
             'vllm.sampling_params': SimpleNamespace(StructuredOutputsParams=lambda **k: k,
                                                     RepetitionDetectionParams=lambda **k: ('Repetition', k))}
         self.cfg.update(model='/fake/qwen', system_prompt='Return JSON.', schema=self.schema,
-                        host_batch_tokens=40000, host_batch_records=4)
+                        host_batch_tokens=40000, host_batch_records=4,
+                        retry={'max_attempts': 2, 'temperatures': [0.7]})
         self.cfg['sampling']['seed'] = 5
         with tempfile.TemporaryDirectory() as tmp, patch.dict(sys.modules, modules), \
                 patch.object(r.signal, 'signal', side_effect=lambda sig, fn: handlers.update({sig: fn})), \
@@ -501,10 +499,12 @@ class DecodingControlTests(unittest.TestCase):
         first, retry = calls[0][0], calls[1][0]
         self.assertEqual(first['repetition_detection'], ('Repetition', self.cfg['sampling']['repetition_detection']))
         self.assertEqual((first['seed'], retry['seed']), (5, 6))
-        self.assertEqual(first['structured_outputs']['json'], r.citation_schema(self.schema, self.row))
+        self.assertEqual((first.get('temperature'), retry['temperature']), (None, 0.7))
+        self.assertEqual(first['structured_outputs']['json'], self.schema)
         self.assertEqual([x['status'] for x in rows], ['success', 'success'])
         self.assertEqual((rows[0]['attempt'], rows[1]['attempt']), (2, 1))
         self.assertEqual(rows[0]['previous_attempts'][0]['finish_reason'], 'repetition')
+        self.assertIn('raw_output', rows[0]['previous_attempts'][0])  # every attempt is recorded
         self.assertEqual(rows[1]['previous_attempts'], [])
         self.assertEqual((rows[0]['thinking_budget_exhausted'], rows[1]['thinking_budget_exhausted']), (True, False))
         self.assertEqual(summary['retried_units'], 1)

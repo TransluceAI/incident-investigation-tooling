@@ -10,8 +10,8 @@ carry their own copy of the runner.
 
 ## Layout
 
-- `scripts/`: runtime installation, pinned model download, submission, Slurm worker,
-  and inference runner.
+- `scripts/`: release build, runtime installation, pinned model download, submission,
+  Slurm worker, and inference runner.
 - `config/`: named model profiles with synthetic text-transport prompts/schemas.
 - `examples/`: synthetic text and request inputs for smoke checks.
 - `REQUESTS.md`: the request/result row format shared with applications.
@@ -40,13 +40,17 @@ their own validation rather than assuming interchangeable behavior.
 
 ## Install on the cluster
 
-Copy this directory to storage visible at the same absolute path on the Slurm
-login and worker nodes. Use a Linux CUDA environment compatible with the recorded
-runtime, and an installed `uv` command. Installation and download happen on the
-login node; inference jobs use offline model files.
+Build each release from a commit, not from a working tree, into storage visible at
+the same absolute path on the Slurm login and worker nodes. `build_release.sh`
+exports `inference/qwen` at that commit with `git archive` and writes the commit to
+`RELEASE`; submissions copy it into the run directory as `release.txt`. Use a Linux
+CUDA environment compatible with the recorded runtime, and an installed `uv`
+command. Installation and download happen on the login node; inference jobs use
+offline model files.
 
 ```bash
-cd /absolute/path/to/inference/qwen
+inference/qwen/scripts/build_release.sh <commit> /absolute/path/to/releases/<name>
+cd /absolute/path/to/releases/<name>
 bash scripts/install_runtime.sh
 .runtime/venv/bin/python scripts/download_model.py
 ```
@@ -124,47 +128,57 @@ otherwise. `squeue -u "$USER"` shows queued/running jobs, and
 
 ## Reasoning and decoding controls
 
-- `qwen3.8-27b-fp8.json`: thinking explicitly off, temperature 0, 2,048 output tokens.
-- `qwen3.8-27b-fp8.thinking.json`: thinking on, temperature 0, 16,384 output tokens.
+- `qwen3.8-27b-fp8.json`: thinking explicitly off, greedy (temperature 0), 2,048 output tokens.
+- `qwen3.8-27b-fp8.thinking.json`: thinking on with the model card's thinking sampling
+  (temperature 1.0, top-p 0.95, top-k 20, min-p 0, presence penalty 0, repetition
+  penalty 1, seed 17), 16,384 output tokens.
 - `qwen3.8-27b-fp8.thinking.controls.json`: additionally sets a 14,336-token thinking
   budget, repetition detection, and up to two attempts before commit.
 
 Download a named profile to resolve its model path, then submit its generated
-config. Temperature 0 is retained for comparison with prior runs; these profiles
-do not establish optimal sampling or application accuracy. Output budgets include
-reasoning and final JSON. Preflight rejects prompt-plus-output budgets that exceed
-the configured context size.
+config. These profiles do not establish optimal sampling or application accuracy.
+Output budgets include reasoning and final JSON. Preflight rejects
+prompt-plus-output budgets that exceed the configured context size.
+
+Runs are not bit-reproducible, including at temperature 0: vLLM output depends on
+batch composition unless batch invariance is enabled, and that is deferred (beta,
+untested on this model), as is an FP8 KV cache. Reproducibility comes from keeping
+the outputs: each run stores its config, runner, inputs and their hashes, and each
+result row its request hash.
 
 Always set `chat_template_kwargs.enable_thinking` explicitly to `true` or `false`.
 An omitted value is rejected: Qwen's template default must not disagree with the
-runner's output parser. The [model card](https://huggingface.co/Qwen/Qwen3.8-27B-FP8#best-practices)
-recommends thinking sampling at temperature 1.0, top-p 0.95, top-k 20, min-p 0,
-presence penalty 0 and repetition penalty 1. Treat that as a separate quality
-comparison against the retained temperature-0 baseline, using representative
-inputs and a new run directory. Retry count and token budgets remain opt-in.
+runner's output parser. The thinking profiles follow the
+[model card](https://huggingface.co/Qwen/Qwen3.8-27B-FP8#best-practices) sampling
+rather than greedy decoding. Compare thinking and non-thinking settings on labelled,
+representative inputs in separate run directories. Retry count and token budgets
+remain opt-in.
 
 Thinking leaves reasoning unconstrained and applies the JSON grammar to the final
 answer. The runner splits on token boundaries and records reasoning/final text
 and token counts. Missing boundaries, invalid JSON, schema violations and
 nonterminal/length finishes become explicit failed rows. Optional
 `sampling.thinking_token_budget` requires `engine.reasoning_config` and room for
-the closing string plus final JSON. Only one output per unit (`sampling.n=1`) is
-supported.
+the closing string plus final JSON. `thinking_budget_exhausted` is true when the
+reasoning ends with the forced closing string after the full budget; a natural stop
+on the last budgeted token is not a cap (with a bare `</think>` end string the two
+cannot be told apart). Only one output per unit (`sampling.n=1`) is supported.
 
-`retry.max_attempts` retries model-output failures within the current batch.
-Previous attempt errors and token usage are retained; an explicit sampling seed
-increments on retry. Greedy retries may repeat the same answer. Resume never
-retries committed failures. A stop signal or elapsed deadline prevents another
+`retry.max_attempts` (off unless set) retries format failures within the current
+batch: invalid JSON, schema violations, length or repetition stops, and reasoning
+that never closed. Engine, template and reasoning-boundary errors are not retried.
+Every attempt is recorded with its error, finish reason, token count and raw output.
+An explicit sampling seed increments on retry, and optional `retry.temperatures`
+(one value per retry) raises the temperature on each retry, as olmOCR does for
+repetition loops; greedy retries may repeat the same answer. Deciding to judge an
+input again, such as a second pass with reasoning, belongs to the application.
+Resume never retries committed failures. A stop signal or elapsed deadline prevents another
 retry and commits the attempt already completed; an in-flight generation can
 still be terminated by Slurm before the batch is committed.
 
-For applications that use source references, optional `citation_constraints=true`
-narrows schema objects with `segment_id`/`chunk_id` against a row's
-`evidence_chunks` map, and narrows `evidence_ids` arrays to known segments.
-Chunk IDs are one-based. This generic opt-in helper requires that field convention;
-`chunk_id` needs an inline integer schema and `evidence_ids` an inline array schema
-with object-form items. It does not verify that an answer is supported by source content. The transport
-profiles leave it disabled. Semantic checks belong to the calling application.
+The runner has no application logic. An application that wants citations limited
+to known sources writes the narrowed JSON Schema into each request; a config with
+`citation_constraints` is rejected. Semantic checks belong to the calling application.
 
 ## Resume
 
@@ -190,7 +204,7 @@ any accepted job in `job-ids.txt`, and only then remove that marker before resum
 python3 -m venv .venv
 .venv/bin/python -m pip install -r requirements-test.txt
 .venv/bin/python -m unittest discover -s tests -v
-bash -n scripts/install_runtime.sh scripts/run.sbatch
+bash -n scripts/build_release.sh scripts/install_runtime.sh scripts/run.sbatch
 ```
 
 This extraction combines the cluster launcher/setup artifacts with the runner
