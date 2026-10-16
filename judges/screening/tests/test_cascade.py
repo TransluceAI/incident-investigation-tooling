@@ -150,8 +150,9 @@ class CascadeTests(unittest.TestCase):
         same = cascade.escalate(self.run, self.run/'report', self.root/'audit3', THINKING, audit_rate=.5, seed=4)
         self.assertEqual((self.root/'audit2/selection.jsonl').read_text(), (self.root/'audit3/selection.jsonl').read_text())
         self.assertEqual(again['selection'], same['selection'])
-        with (self.run/'report/pending.jsonl').open('a') as f:
-            f.write(json.dumps({'unit_id': 'x'}) + '\n')
+        from screening_judge.common import write_jsonl
+        judgments = list(iter_jsonl(self.run/'report/judgments.jsonl'))
+        write_jsonl(self.run/'report/judgments.jsonl', judgments[:-1])
         with self.assertRaisesRegex(ValueError, 'pending'):
             cascade.escalate(self.run, self.run/'report', self.root/'refused', THINKING)
         with self.assertRaisesRegex(ValueError, 'runner profile'):
@@ -256,6 +257,41 @@ class CascadeTests(unittest.TestCase):
         # Six audited requests; the failed one is not counted among validated audit answers.
         self.assertEqual(summary['audit'], {'audited': 5, 'pass2_positive': 0, 'note': summary['audit']['note']})
 
+    def test_pending_pass1_is_preserved_when_combining(self):
+        outcomes = self.outcomes()
+        del outcomes['c']['hacking']
+        self.pass1(outcomes)
+        uid = next(iter_jsonl(self.run/'report/pending.jsonl'))['unit_id']
+        out = self.root/'pass2'
+        cascade.escalate(self.run, self.run/'report', out, THINKING, audit_rate=0, allow_pending=True)
+        self.pass2_answers(out)
+        with self.assertRaisesRegex(ValueError, 'Pass 1.*pending'):
+            cascade.combine(self.run/'report', out, out/'report', self.root/'refused')
+        summary = cascade.combine(self.run/'report', out, out/'report', self.root/'final', allow_pending=True)
+        final = list(iter_jsonl(self.root/'final/final-judgments.jsonl'))
+        self.assertEqual(len(final), 9)
+        pending, = [j for j in final if j['unit_id'] == uid]
+        self.assertEqual(pending['validation_status'], 'pending')
+        self.assertTrue(pending['pass1_pending'])
+        self.assertEqual(summary['pass1_pending'], 1)
+        self.assertEqual([(p['unit_id'], p['pass']) for p in iter_jsonl(self.root/'final/pending.jsonl')],
+                         [(uid, 1)])
+        self.assertNotIn(uid, {q['unit_id'] for q in iter_jsonl(self.root/'final/review-queue.jsonl')})
+
+    def test_positive_with_failed_second_pass_has_one_queue_row(self):
+        self.pass1(self.outcomes({('a', 'hacking'): ('yes', .9)}))
+        out = self.root/'pass2'
+        cascade.escalate(self.run, self.run/'report', out, THINKING, audit_rate=0)
+        uid = self.uid[('a', 'hacking')]
+        self.pass2_answers(out, {uid: 'yes'}, bad_citation={uid})
+        summary = cascade.combine(self.run/'report', out, out/'report', self.root/'final')
+        queued = [q for q in iter_jsonl(self.root/'final/review-queue.jsonl') if q['unit_id'] == uid]
+        self.assertEqual(len(queued), 1)
+        self.assertEqual(queued[0]['queue_reason'], 'positive')
+        self.assertEqual(queued[0]['queue_reasons'], ['positive', 'unverified_positive'])
+        self.assertEqual(queued[0]['pass2']['validation_status'], 'failed')
+        self.assertEqual(summary['pass2_unresolved_queued'], 1)
+
     def test_combine_refuses_unfinished_pass2_unless_allowed(self):
         self.pass1(self.outcomes())
         out = self.root/'pass2'
@@ -267,7 +303,7 @@ class CascadeTests(unittest.TestCase):
         summary = cascade.combine(self.run/'report', out, out/'report', self.root/'final', allow_pending=True)
         final = {j['unit_id']: j for j in iter_jsonl(self.root/'final/final-judgments.jsonl')}
         self.assertEqual((final[uid]['pass'], final[uid]['pass2_pending']), (1, True))
-        pending = list(iter_jsonl(self.root/'final/pass2-pending.jsonl'))
+        pending = list(iter_jsonl(self.root/'final/pending.jsonl'))
         self.assertEqual([(p['unit_id'], p['selection_reasons']) for p in pending],
                          [(uid, ['rule:file_version_path'])])
         self.assertEqual(summary['pass2_pending'], 1)
@@ -293,6 +329,38 @@ class CascadeTests(unittest.TestCase):
         for name in ('final-judgments', 'review-queue', 'demoted'):
             self.assertFalse(any(r['source'] == SOURCE for r in iter_jsonl(self.root/f'final/{name}.jsonl')))
         self.assertEqual(summary['requests'], 3)  # the corpus item's three axes only
+        control_uid = controls[0]['unit_id']
+        self.pass2_answers(out, skip={control_uid})
+        self.assertEqual(list(iter_jsonl(out/'report/pending.jsonl')), [])
+        with self.assertRaisesRegex(ValueError, 'Pass 2.*pending'):
+            cascade.combine(self.run/'report', out, out/'report', self.root/'incomplete')
+
+    def test_pending_controls_remain_accounted_for_in_both_passes(self):
+        from screening_judge.common import write_jsonl
+        from screening_judge.prepare import prepare
+        write_jsonl(self.data/'resources/sample/records.jsonl', [self.record()])
+        self.run = self.root/'pass1'
+        prepare(self.data, self.run, lambda chat: sum(len(m['content']) for m in chat), 15000, config())
+        requests = list(iter_jsonl(self.run/'requests.jsonl'))
+        control_ids = [r['custom_id'] for r in requests if r['custom_id'].startswith('control-')]
+        rows = [{**answered(self.run, r['custom_id']), 'status': 'success',
+                 'result': result(r['custom_id'].rsplit(':', 1)[1], 'insufficient_evidence')}
+                for r in requests if r['custom_id'] != control_ids[0]]
+        write_worker(self.run, rows)
+        write_report(self.run/'report', *reconcile(self.run, [self.run/'outputs']), None)
+        self.assertEqual(list(iter_jsonl(self.run/'report/pending.jsonl')), [])
+        with self.assertRaisesRegex(ValueError, 'Pass 1.*pending'):
+            cascade.escalate(self.run, self.run/'report', self.root/'refused', THINKING)
+        out = self.root/'pass2'
+        cascade.escalate(self.run, self.run/'report', out, THINKING, allow_pending=True)
+        self.pass2_answers(out, skip={control_ids[1]})
+        summary = cascade.combine(self.run/'report', out, out/'report', self.root/'final', allow_pending=True)
+        controls = {r['unit_id']: r for r in iter_jsonl(self.root/'final/control-judgments.jsonl')}
+        self.assertEqual(len(controls), len(control_ids))
+        self.assertTrue(controls[control_ids[0]]['pass1_pending'])
+        self.assertTrue(controls[control_ids[1]]['pass2_pending'])
+        self.assertEqual(summary['controls'], {'requests': len(control_ids), 'pass1_pending': 1, 'pass2_pending': 1})
+        self.assertEqual(list(iter_jsonl(self.root/'final/pending.jsonl')), [])
 
     def test_shards_never_outnumber_selected_windows(self):
         self.pass1(self.outcomes({('a', 'hacking'): ('yes', .9)}))

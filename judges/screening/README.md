@@ -78,11 +78,11 @@ screening-judge report \
 
 - `summary.json`: item/request counts, validation status, control results, and assessments by axis and shape.
 - `item-results.jsonl`: per-item assessments and completion status for all three axes.
-- `judgments.jsonl`: committed judgments, including validation failures and resolved evidence for validated results.
+- `judgments.jsonl`: all committed judgments, including synthetic controls, validation failures and resolved evidence. Cascade reconciliation reads this complete file.
 - `review-queue.jsonl`: every request needing a human: verified positives on any axis, unverified positives, abstentions, and failures, each with its `queue_reason`, in that order. Within each reason it is sorted by descending `confidence` (missing scores last), then by `p_yes`. An item can contribute several rows.
 - `failures.jsonl`, `pending.jsonl`, `unverified-candidates.jsonl`: failures, unfinished requests, and unresolved positive claims kept separate from negatives.
 - `near-misses.jsonl`, `injection-review.jsonl`: additional candidates for review.
-- `control-results.jsonl`: synthetic controls, excluded from corpus item counts. Request totals include controls. Runs prepared with `--no-controls` have no control checks and zero control counts. In a pass-2 report, control axes that were not selected are untested: they count in `controls.not_requested`, not in `passed` or `total`.
+- `control-results.jsonl`: synthetic controls, excluded from corpus item counts. Request totals include controls. Reviewer files exclude controls; `summary.controls.failed`, `.pending` and `.unverified_candidates` track their execution issues separately. Runs prepared with `--no-controls` have no control checks and zero control counts. In a pass-2 report, control axes that were not selected are untested: they count in `controls.not_requested`, not in `passed` or `total`.
 
 Reports check prepared artifact hashes, worker configuration against `engine.json`, membership in each worker's selected manifest, and that each result's `request_sha256` matches its prepared request. Positive judgments require schema validity and resolved citations; action references must cite resolved evidence. The model's free-text `location` is unverified. Archive replay responses cannot establish attack success.
 
@@ -126,15 +126,19 @@ across incompatible passes or models. Both commands verify report/run identity.
 | Output | Contents |
 | --- | --- |
 | `final-judgments.jsonl` | Merged corpus judgments |
-| `review-queue.jsonl` | Cases needing review, including failed or unverified pass-2 answers |
+| `review-queue.jsonl` | One row per request needing review, with `queue_reasons` for both passes; the highest-priority answer determines its position |
 | `demoted.jsonl` | Pass-1 positives that pass 2 no longer supports |
 | `control-judgments.jsonl` | Synthetic controls, separate from corpus judgments and queues |
-| `pass2-pending.jsonl` | Unfinished selected requests when `--allow-pending` is used |
+| `pending.jsonl` | Unfinished corpus requests when `--allow-pending` is used, with `pass` identifying the unfinished pass |
 | `summary.json` | Promotions, demotions, failures, and observed positive flips in validated audits |
 
 Both commands reject pending requests in their input pass unless `--allow-pending`
-is set. Pending pass-2 requests retain their pass-1 answer and are marked
-`pass2_pending`. Audit flips are observations, not estimates of total misses or
+is set, including pending controls. Pending pass-1 requests remain explicit
+`validation_status: "pending"` rows with `pass1_pending`; pending pass-2 requests
+retain their pass-1 answer and are marked `pass2_pending`. Synthetic controls
+stay in `control-judgments.jsonl`, with pending counts under `summary.controls`.
+If pass 2 fails, the retained pass-1 judgment includes the failed `pass2` result;
+a queue row led by pass 2 includes its `pass1` result. Audit flips are observations, not estimates of total misses or
 recall. Shards never outnumber selected windows; an empty selection needs no
 inference run and writes no shards.
 

@@ -83,20 +83,24 @@ def _observe(item, rec):
 
 
 def _arquivo_items(source, recs, corpus, items, gaps):
-    safe = []
+    safe, texts = [], {}
     for rec in recs:
         if rec["kind"] in {"arquivo_index", "provider_redirect"}:
             candidate = _new_item("unreadable-" + sha256_text(source + rec["observation_id"])[:24], source, "capture")
             _observe(candidate, rec)
-            if item_bodies(candidate, corpus, gaps) is None:
+            bodies = item_bodies(candidate, corpus, gaps)
+            if bodies is None:
+                candidate["integrity"] = "excluded"
                 items[candidate["item_id"]] = candidate
                 continue
+            texts.update(bodies)
         meta = records.metadata(rec)
         if rec["kind"] == "arquivo_capture" and any(not isinstance(meta.get(k), str)
                                                         for k in ("original_url", "capture_timestamp")):
             meta = {}
         safe.append({**rec, "metadata": meta, "original_record": {}})
-    ledger = arquivo_ledger.build_ledger(safe, corpus.read)
+    ledger = arquivo_ledger.build_ledger(safe, lambda path: texts[path] if path in texts else corpus.read(path))
+    texts.clear()  # The ledger has consumed the verified index/redirect texts.
     by_obs = {r["observation_id"]: r for r in recs}
     for ev in ledger.rows():
         item = _new_item(sha256_text(source + "|" + ev["event_id"])[:24], source, "capture")
@@ -185,7 +189,7 @@ def item_bodies(item, corpus, gaps):
             gaps.append({"item_id": item["item_id"], "gap": "document_unreadable", "path": path,
                          "error": f"{type(exc).__name__}: {exc}"})
             return None
-        if declared and sha256_text(text) != declared:
+        if declared and corpus.hashes[path] != declared:
             gaps.append({"item_id": item["item_id"], "gap": "document_hash_mismatch", "path": path})
             return None
         out.append((path, text))
@@ -212,7 +216,6 @@ def prepare(data_root, out, count, window_tokens, config_template, config_dir=No
                   name: sha256_file(Path(__file__).with_name(name + ".py"))
                   for name in ("arquivo_ledger", "benchmark", "common", "controls", "decode", "prepare",
                                "prompts", "records", "render", "scanner", "schemas", "shapes")}}
-    widest = None  # Each axis is measured; character length does not order token counts.
     items = (benchmark.build_items(corpus.root, benchmark_manifest, gaps) if benchmark_manifest
              else build_items(corpus.root, corpus, gaps))
     if not items:
@@ -221,12 +224,12 @@ def prepare(data_root, out, count, window_tokens, config_template, config_dir=No
     coverage, n_windows = [], 0
     with jsonl_stream(out / "windows.jsonl") as put_window, jsonl_stream(out / "requests.jsonl") as put_request:
         for item in items:
-            n_windows += _prepare_item(item, corpus, gaps, config, count, widest, window_tokens,
+            n_windows += _prepare_item(item, corpus, gaps, config, count, window_tokens,
                                        put_window, put_request, coverage)
         if with_controls:
             for item, bodies, _, _ in controls.control_items():
                 items.append(item)
-                n_windows += _prepare_item(item, corpus, gaps, config, count, widest, window_tokens,
+                n_windows += _prepare_item(item, corpus, gaps, config, count, window_tokens,
                                            put_window, put_request, coverage, bodies)
     item_rows = [{**{k: v for k, v in i.items() if k not in ("kinds", "time_basis")},
                   "kinds": sorted(i["kinds"]), "time_basis": sorted(i["time_basis"]),
@@ -291,10 +294,12 @@ def write_shards(out, shards):
     return names, loads
 
 
-def _prepare_item(item, corpus, gaps, config, count, widest, window_tokens, put_window, put_request, coverage,
+def _prepare_item(item, corpus, gaps, config, count, window_tokens, put_window, put_request, coverage,
                   bodies=None):
     """Write one item's windows; return how many were written."""
-    if bodies is None:
+    if item.get("integrity") == "excluded":
+        bodies = None
+    elif bodies is None:
         bodies = item_bodies(item, corpus, gaps)
     if bodies is None:
         coverage.append({"item_id": item["item_id"], "status": "excluded_integrity", "windows": []})

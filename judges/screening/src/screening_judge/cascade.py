@@ -57,16 +57,15 @@ def escalate(run, report, out, engine_template, borderline=(0.2, 0.8), audit_rat
     if preparation.get("pass", 1) != 1:
         raise ValueError("Escalate from a pass-1 run")
     judgments = _judgments(report, sha256_file(run / "preparation.json"))
-    pending = list(iter_jsonl(Path(report) / "pending.jsonl"))
-    if pending and not allow_pending:
-        raise ValueError(f"Pass 1 has {len(pending)} pending requests; finish it or pass allow_pending")
     runner = runner_profile(engine_template)
     reasons = defaultdict(list)
     axes = list(json.loads((run / "config.json").read_text())["schemas"])
+    expected = set()
     for w in iter_jsonl(run / "windows.jsonl"):
         fired = rules.hits(w)
         for axis in axes:
             uid = f"{w['window_id']}:{axis}"
+            expected.add(uid)
             j = judgments.get(uid)
             if j is None:
                 continue
@@ -78,6 +77,11 @@ def escalate(run, report, out, engine_template, borderline=(0.2, 0.8), audit_rat
                 reasons[uid].append("borderline")
             elif not reasons[uid] and _audited(seed, uid, audit_rate):
                 reasons[uid].append("audit")
+    if set(judgments) - expected:
+        raise ValueError("Pass-1 report contains units outside the prepared run")
+    pending = expected - set(judgments)
+    if pending and not allow_pending:
+        raise ValueError(f"Pass 1 has {len(pending)} pending requests; finish it or pass allow_pending")
     selected = {uid for uid, why in reasons.items() if why}
     out.mkdir(parents=True, exist_ok=False)
     for name in COPIED:
@@ -118,7 +122,17 @@ def combine(pass1_report, pass2_run, pass2_report, out, allow_pending=False):
         raise ValueError("Pass-1 report differs from the one pass 2 was selected from")
     first = _judgments(pass1_report, preparation["parent"]["preparation_sha256"])
     second = _judgments(pass2_report, sha256_file(pass2_run / "preparation.json"))
+    axes = json.loads((pass2_run / "config.json").read_text())["schemas"]
+    expected = {f"{w['window_id']}:{a}": {"item_id": w["item_id"], "axis": a, "window_id": w["window_id"]}
+                for w in iter_jsonl(pass2_run / "windows.jsonl") for a in axes}
+    if set(first) - set(expected):
+        raise ValueError("Pass-1 report contains units outside the prepared run")
+    pending1 = set(expected) - set(first)
+    if pending1 and not allow_pending:
+        raise ValueError(f"Pass 1 has {len(pending1)} pending requests; finish it or pass allow_pending")
     selection = {r["custom_id"]: r["reasons"] for r in iter_jsonl(pass2_run / "selection.jsonl")}
+    if set(selection) - set(first):
+        raise ValueError("Pass-2 selection contains units absent from pass 1")
     if set(second) - set(selection):
         raise ValueError("Pass-2 report contains requests that were not selected")
     unfinished = set(selection) - set(second)
@@ -128,6 +142,14 @@ def combine(pass1_report, pass2_run, pass2_report, out, allow_pending=False):
     items = {i["item_id"]: i for i in iter_jsonl(pass2_run / "items.jsonl")}
     final, demoted, unresolved, controls, pending, changes = [], [], [], [], [], Counter()
     audit = Counter()
+    for uid in sorted(pending1):
+        source = items[expected[uid]["item_id"]]["source"]
+        row = {"unit_id": uid, **expected[uid], "source": source, "pass": None,
+               "validation_status": "pending", "pass1_pending": True, "selection_reasons": []}
+        (controls if source == CONTROL_SOURCE else final).append(row)
+        if source != CONTROL_SOURCE:
+            changes["pass1_pending"] += 1
+            pending.append({**row, "pass": 1})
     for uid, j1 in first.items():
         j2 = second.get(uid)
         reasons = selection.get(uid, [])
@@ -135,12 +157,13 @@ def combine(pass1_report, pass2_run, pass2_report, out, allow_pending=False):
             # Synthetic controls are kept apart, as in the ordinary report.
             controls.append({**(j2 if j2 is not None and j2["validation_status"] == "validated" else j1),
                              "pass": 2 if j2 is not None and j2["validation_status"] == "validated" else 1,
-                             "selection_reasons": reasons})
+                             "selection_reasons": reasons,
+                             **({"pass2_pending": True} if uid in unfinished else {})})
             continue
         if uid in unfinished:
             changes["pass2_pending"] += 1
             pending.append({"unit_id": uid, "item_id": j1["item_id"], "axis": j1["axis"],
-                            "selection_reasons": reasons})
+                            "source": j1["source"], "pass": 2, "selection_reasons": reasons})
         if j2 is not None and j2["validation_status"] == "validated":
             chosen = {**j2, "pass": 2, "pass1_reason": queue_reason(j1)}
             before, after = queue_reason(j1), queue_reason(j2)
@@ -159,20 +182,35 @@ def combine(pass1_report, pass2_run, pass2_report, out, allow_pending=False):
                 # answer (for example an uncited pass-2 yes) still goes to review.
                 changes["pass2_failed"] += 1
                 chosen["pass2_error"] = j2.get("validation_error")
-                unresolved.append({**j2, "pass": 2, "pass1_reason": queue_reason(j1), "selection_reasons": reasons})
+                chosen["pass2"] = j2
+                unresolved.append({**j2, "pass": 2, "pass1": j1, "pass1_reason": queue_reason(j1),
+                                   "selection_reasons": reasons})
         final.append({**chosen, "selection_reasons": reasons})
     lowered = {d["unit_id"] for d in demoted}
-    queue = review_queue([j for j in final if j["unit_id"] not in lowered] + unresolved, items)
+    ranked = review_queue([j for j in final if j["unit_id"] not in lowered
+                           and j["validation_status"] != "pending"] + unresolved, items)
+    # review_queue ranks by urgency: retain that answer and combine the triggers.
+    queued = {}
+    for row in ranked:
+        kept = queued.setdefault(row["unit_id"], {**row, "queue_reasons": []})
+        if row["queue_reason"] not in kept["queue_reasons"]:
+            kept["queue_reasons"].append(row["queue_reason"])
+    queue = list(queued.values())
+    if len(final) + len(controls) != len(expected):
+        raise ValueError("Cascade did not account for every prepared request")
     out.mkdir(parents=True, exist_ok=True)
     write_jsonl(out / "final-judgments.jsonl", final)
     write_jsonl(out / "control-judgments.jsonl", controls)
     write_jsonl(out / "review-queue.jsonl", queue)
     write_jsonl(out / "demoted.jsonl", sorted(demoted, key=_pass1_rank))
-    write_jsonl(out / "pass2-pending.jsonl", pending)
+    write_jsonl(out / "pending.jsonl", pending)
     summary = {"requests": len(final), "pass2_requests": len(selection), "pass2_validated": sum(
                    j["pass"] == 2 for j in final), **dict(changes),
                "review_queue": dict(Counter(q["queue_reason"] for q in queue)), "demoted_queue": len(demoted),
                "pass2_unresolved_queued": len(unresolved),
+               "controls": {"requests": len(controls),
+                            "pass1_pending": sum(c.get("pass1_pending", False) for c in controls),
+                            "pass2_pending": sum(c.get("pass2_pending", False) for c in controls)},
                "audit": {**dict(audit), "note": "Counts audited pass-1 negatives that pass 2 validated, and how many "
                                                 "of those pass 2 answered yes. Observed flips only: not an estimate "
                                                 "of total misses or recall."},
