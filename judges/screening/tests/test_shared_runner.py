@@ -17,7 +17,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from screening_judge.common import iter_jsonl, write_jsonl
+from screening_judge.common import write_jsonl
 from screening_judge.prepare import prepare
 from screening_judge.report import reconcile, write_report
 from test_pipeline import config, result

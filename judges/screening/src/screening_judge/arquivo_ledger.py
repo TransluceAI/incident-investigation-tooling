@@ -1,4 +1,8 @@
-"""Arquivo ledger (unchanged from judges/arquivo): one event per distinct (original URL, capture timestamp)."""
+"""Arquivo ledger: one event per distinct (original URL, capture timestamp).
+
+Copied verbatim from judges/arquivo/src/arquivo_judge/ledger.py at commit e3ee920;
+the screening judge supersedes that package, so this is the maintained copy.
+"""
 import json
 import re
 from dataclasses import dataclass, field
