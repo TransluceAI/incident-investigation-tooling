@@ -412,7 +412,7 @@ class ReportSuccessTests(unittest.TestCase):
 
     def test_report_without_controls_has_no_control_checks(self):
         self.prepare([self.record()])
-        summary = write_report(self.run/'report', *reconcile(self.run, []), None)
+        summary = write_report(self.run/'report', *reconcile(self.run, []))
         self.assertEqual(summary['controls'],
                          {'checks': [], 'passed': 0, 'total': 0, 'not_requested': 0,
                           'failed': 0, 'pending': 0, 'unverified_candidates': 0})
@@ -424,7 +424,7 @@ class ReportSuccessTests(unittest.TestCase):
         self.run = self.root / 'run'
         prepare(self.data, self.run, lambda chat: sum(len(m['content']) for m in chat),
                 15000, config(), with_controls=True)
-        summary = write_report(self.run/'report', *reconcile(self.run, []), None)
+        summary = write_report(self.run/'report', *reconcile(self.run, []))
         scored = summary['controls']
         self.assertEqual((scored['passed'], scored['total'], scored['not_requested']), (0, 25, 0))
         self.assertTrue(all(c['passed'] is False for c in scored['checks']))
@@ -444,7 +444,7 @@ class ReportSuccessTests(unittest.TestCase):
             rows.append({**answered(self.run, uid), 'status': 'success', 'result': res,
                          'logprobs': scored(res, .6)})
         write_worker(self.run, rows)
-        summary = write_report(self.run/'report', *reconcile(self.run, [self.run/'outputs']), None)
+        summary = write_report(self.run/'report', *reconcile(self.run, [self.run/'outputs']))
         for name in ('item-results', 'failures', 'pending', 'unverified-candidates',
                      'near-misses', 'review-queue', 'injection-review'):
             self.assertFalse(any(r['source'] == controls.SOURCE
@@ -479,9 +479,9 @@ class ReportSuccessTests(unittest.TestCase):
         parts=reconcile(self.run,[self.run/'outputs'])
         hacking = next(j for j in parts[2] if j['axis'] == 'hacking')
         self.assertAlmostEqual(hacking['p_yes'], .6)
-        summary=write_report(self.run/'report',*parts,None)
+        summary=write_report(self.run/'report',*parts)
         self.assertEqual(summary['unverified_candidates'],1)
-        self.assertEqual(summary['assessments']['hacking'],{'positive_uncalibrated':1})
+        self.assertEqual(summary['assessments']['hacking'],{'positive':1})
         self.assertEqual(summary['assessments']['agentic_activity'],{'incomplete':1})
         self.assertEqual(len((self.run/'report/injection-review.jsonl').read_text().splitlines()),1)
 
@@ -491,7 +491,7 @@ class ReportSuccessTests(unittest.TestCase):
         rows = [row for row in rows if row['axis'] != 'coordination']
         write_worker(self.run, rows)
         parts = reconcile(self.run, [self.run/'outputs'])
-        summary = write_report(self.run/'report', *parts, None)
+        summary = write_report(self.run/'report', *parts)
         self.assertEqual(summary['failed'], 1)
         self.assertEqual(summary['pending'], 1)
         self.assertEqual(summary['unverified_candidates'], 0)
@@ -563,7 +563,7 @@ class ReviewQueueTests(unittest.TestCase):
                 'result': {'label': 'yes', 'confidence': .8}, 'p_yes': p} for u, p in (('a', .3), ('b', .6))]
         self.assertEqual([q['unit_id'] for q in review_queue(tie, items)], ['b', 'a'])
         parts = reconcile(self.run, [self.run/'outputs'])
-        summary = write_report(self.run/'report', *parts, None)
+        summary = write_report(self.run/'report', *parts)
         self.assertEqual(summary['review_queue'], {'positive': 1, 'abstention': 1, 'failure': 1})
         # A negative answer is not queued.
         rows[2].update(status='success', result=result('coordination'), error=None)
@@ -572,7 +572,7 @@ class ReviewQueueTests(unittest.TestCase):
         # A negative with high confidence is counted as an inconsistency, not ranked.
         rows[2]['result'] = {**result('coordination'), 'confidence': .9}
         write_worker(self.run, rows)
-        summary = write_report(self.run/'report-neg', *reconcile(self.run, [self.run/'outputs']), None)
+        summary = write_report(self.run/'report-neg', *reconcile(self.run, [self.run/'outputs']))
         self.assertEqual(summary['confidence_on_negatives'], {'validated_no': 1, 'above_half': 1})
 
 

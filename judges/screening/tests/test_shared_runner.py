@@ -101,7 +101,7 @@ class SharedRunnerContractTests(unittest.TestCase):
                     patch.object(sys, 'argv', argv), contextlib.redirect_stdout(io.StringIO()):
                 runner.main()  # every request validated against its own schema
             parts = reconcile(run, [run / 'outputs'])
-            summary = write_report(run / 'report', *parts, None)
+            summary = write_report(run / 'report', *parts)
         self.assertEqual(sorted(seen), [('agentic_activity', 10), ('coordination', 10), ('hacking', 10)])
         self.assertEqual(summary['failed'], 0)
         self.assertEqual(summary['pending'], 0)

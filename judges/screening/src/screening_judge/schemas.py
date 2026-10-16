@@ -3,7 +3,7 @@
 Property order is generation order under grammar-constrained decoding, so the
 model writes its cited evidence and reasoning before the label (all surveyed
 frameworks and vendor guidance put reasoning first). Labels are binary plus an
-abstain value; likely/possible are derived later from calibrated probabilities.
+abstain value.
 
 Only JSON-schema keywords already exercised with the cluster's vLLM grammar
 backend are used (type, enum, properties, required, additionalProperties,

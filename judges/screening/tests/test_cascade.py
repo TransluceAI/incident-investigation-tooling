@@ -108,7 +108,7 @@ class CascadeTests(unittest.TestCase):
                 rows.append({**answered(self.run, uid), 'status': 'success', 'result': res,
                              'logprobs': scored(res, p_yes)})
         write_worker(self.run, rows)
-        write_report(self.run/'report', *reconcile(self.run, [self.run/'outputs']), None)
+        write_report(self.run/'report', *reconcile(self.run, [self.run/'outputs']))
 
     def outcomes(self, overrides=None):
         base = {name: {axis: ('no', .05) for axis in ('hacking', 'agentic_activity', 'coordination')}
@@ -177,7 +177,7 @@ class CascadeTests(unittest.TestCase):
                 res['evidence'] = [{'segment_id': sid, 'chunk_id': 1, 'location': 'body'}]
             rows.append({**answered(out, uid), 'status': 'success', 'result': res})
         write_worker(out, rows)
-        write_report(out/'report', *reconcile(out, [out/'outputs']), None)
+        write_report(out/'report', *reconcile(out, [out/'outputs']))
         summary = cascade.combine(self.run/'report', out, out/'report', self.root/'final')
         self.assertEqual((summary['demoted'], summary['promoted']), (1, 2))
         self.assertEqual(summary['audit']['audited'], 4)  # a:coordination and c's axes; b's came from a rule
@@ -212,7 +212,7 @@ class CascadeTests(unittest.TestCase):
                                     'location': 'body'}]
             rows.append({**answered(out, uid), 'status': 'success', 'result': res})
         write_worker(out, rows)
-        write_report(out/'report', *reconcile(out, [out/'outputs']), None)
+        write_report(out/'report', *reconcile(out, [out/'outputs']))
 
     def test_reports_are_bound_to_their_own_prepared_run(self):
         self.pass1(self.outcomes())
@@ -228,19 +228,6 @@ class CascadeTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'pass-1'):
             cascade.escalate(a, a/'report', self.root/'again', THINKING)
         cascade.combine(self.run/'report', a, a/'report', self.root/'ok')
-
-    def test_pass2_has_its_own_calibration_identity(self):
-        self.pass1(self.outcomes())
-        first = json.loads((self.run/'preparation.json').read_text())['classifier_sha256']
-        a = cascade.escalate(self.run, self.run/'report', self.root/'a', THINKING, audit_rate=1.0)
-        b = cascade.escalate(self.run, self.run/'report', self.root/'b',
-                             {**THINKING, 'model': '/path/to/another-model'}, audit_rate=1.0)
-        self.assertEqual(len({first, a['classifier_sha256'], b['classifier_sha256']}), 3)
-        # Thresholds fitted on pass 1 are refused for pass 2.
-        with self.assertRaisesRegex(ValueError, 'Threshold config'):
-            reconcile(self.root/'a', [], thresholds={'classifier_sha256': first, 'axes': {}})
-        reconcile(self.root/'a', [], thresholds={'classifier_sha256': a['classifier_sha256'],
-                                                 'inference_sha256': None, 'axes': {}})
 
     def test_unresolved_pass2_answers_stay_in_the_queue(self):
         self.pass1(self.outcomes())
@@ -319,7 +306,7 @@ class CascadeTests(unittest.TestCase):
                  'result': result(r['custom_id'].rsplit(':', 1)[1], 'insufficient_evidence')}
                 for r in iter_jsonl(self.run/'requests.jsonl')]
         write_worker(self.run, rows)
-        write_report(self.run/'report', *reconcile(self.run, [self.run/'outputs']), None)
+        write_report(self.run/'report', *reconcile(self.run, [self.run/'outputs']))
         out = self.root/'pass2'
         cascade.escalate(self.run, self.run/'report', out, THINKING, audit_rate=0)
         self.pass2_answers(out)
@@ -347,7 +334,7 @@ class CascadeTests(unittest.TestCase):
                  'result': result(r['custom_id'].rsplit(':', 1)[1], 'insufficient_evidence')}
                 for r in requests if r['custom_id'] != control_ids[0]]
         write_worker(self.run, rows)
-        write_report(self.run/'report', *reconcile(self.run, [self.run/'outputs']), None)
+        write_report(self.run/'report', *reconcile(self.run, [self.run/'outputs']))
         self.assertEqual(list(iter_jsonl(self.run/'report/pending.jsonl')), [])
         with self.assertRaisesRegex(ValueError, 'Pass 1.*pending'):
             cascade.escalate(self.run, self.run/'report', self.root/'refused', THINKING)
@@ -381,7 +368,7 @@ class CascadeTests(unittest.TestCase):
         write_worker(self.run, [{**answered(self.run, r['custom_id']), 'status': 'success',
                                  'result': result(r['custom_id'].rsplit(':', 1)[1])}
                                 for r in iter_jsonl(self.run/'requests.jsonl')])
-        write_report(self.run/'report', *reconcile(self.run, [self.run/'outputs']), None)
+        write_report(self.run/'report', *reconcile(self.run, [self.run/'outputs']))
         summary = cascade.escalate(self.run, self.run/'report', self.root/'none', THINKING, audit_rate=0, shards=8)
         self.assertEqual(summary['requests'], 0)
         self.assertIn('nothing to run', summary['note'])

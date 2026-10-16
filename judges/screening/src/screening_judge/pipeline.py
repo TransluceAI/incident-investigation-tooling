@@ -1,4 +1,4 @@
-"""Command line: prepare, report, escalate, cascade, evaluate, compare."""
+"""Command line: prepare, report, escalate, cascade, evaluate."""
 import argparse
 import json
 from pathlib import Path
@@ -50,7 +50,6 @@ def main():
     b.add_argument("--run", required=True)
     b.add_argument("--outputs", nargs="+", required=True)
     b.add_argument("--out", required=True)
-    b.add_argument("--thresholds", help="thresholds.json from evaluate (dev split only)")
     b.add_argument("--near-miss", type=float, default=0.2)
     e = sub.add_parser("escalate", help="Select pass-1 requests for a reasoning pass and write that run")
     e.add_argument("--run", required=True, help="Pass-1 prepared run")
@@ -75,14 +74,7 @@ def main():
     c.add_argument("--results", required=True)
     c.add_argument("--key", required=True)
     c.add_argument("--out", required=True)
-    c.add_argument("--min-precision", type=float, default=0.9)
     c.add_argument("--include-test", action="store_true", help="Explicitly unseal test metrics for a frozen candidate")
-    d = sub.add_parser("compare", help="Paired McNemar test of two runs on one axis")
-    d.add_argument("--a", required=True)
-    d.add_argument("--b", required=True)
-    d.add_argument("--key", required=True)
-    d.add_argument("--axis", required=True, choices=["overall", *ev.AXES])
-    d.add_argument("--split", choices=["train", "dev", "test"], default="dev")
     args = p.parse_args()
     if args.command == "prepare":
         engine = json.loads(Path(args.engine).read_text())
@@ -97,9 +89,8 @@ def main():
             summary["token_counts"] = f"estimated at {args.estimate_tokens} characters per token"
         print(json.dumps(summary, indent=2))
     elif args.command == "report":
-        thresholds = json.loads(Path(args.thresholds).read_text()) if args.thresholds else None
-        parts = reconcile(args.run, args.outputs, thresholds, args.near_miss)
-        print(json.dumps(write_report(args.out, *parts, thresholds), indent=2))
+        parts = reconcile(args.run, args.outputs, args.near_miss)
+        print(json.dumps(write_report(args.out, *parts), indent=2))
     elif args.command == "escalate":
         engine = json.loads(Path(args.engine).read_text())
         print(json.dumps(cascade.escalate(args.run, args.report, args.out, engine, tuple(args.borderline),
@@ -107,14 +98,11 @@ def main():
     elif args.command == "cascade":
         print(json.dumps(cascade.combine(args.pass1_report, args.pass2_run, args.pass2_report, args.out,
                                          args.allow_pending), indent=2))
-    elif args.command == "evaluate":
+    else:
         out = Path(args.out)
         out.mkdir(parents=True, exist_ok=True)
-        report, thresholds = ev.evaluate(args.results, args.key, out / "evaluation.json", args.min_precision, args.include_test)
-        (out / "thresholds.json").write_text(json.dumps(thresholds, indent=2) + "\n")
-        print(json.dumps({k: report[k] for k in ("key_rows", "partitions", "thresholds_from_dev")}, indent=2))
-    else:
-        print(json.dumps(ev.mcnemar(args.a, args.b, args.key, args.axis, args.split), indent=2))
+        report = ev.evaluate(args.results, args.key, out / "evaluation.json", args.include_test)
+        print(json.dumps({k: report[k] for k in ("key_rows", "partitions")}, indent=2))
 
 
 if __name__ == "__main__":

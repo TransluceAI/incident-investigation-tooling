@@ -60,23 +60,13 @@ class BenchmarkTests(unittest.TestCase):
         self.assertEqual(self.run_prepare()['excluded_integrity'],2)
 
     def test_shared_body_is_disambiguated_by_case_id(self):
-        a=prediction('same','positive_uncalibrated',iid='a');a['benchmark_case_id']='positive'
+        a=prediction('same','positive',iid='a');a['benchmark_case_id']='positive'
         b=prediction('same','no_evidence',iid='b');b['benchmark_case_id']='negative'
         by_hash=evaluate.predictions([a,b])
-        self.assertIs(evaluate.case_prediction(by_hash,{'id':'positive','document_sha256':'same'},'overall')[0],True)
-        self.assertIs(evaluate.case_prediction(by_hash,{'id':'negative','document_sha256':'same'},'overall')[0],False)
-        self.assertIsNone(evaluate.case_prediction(by_hash,{'id':'unknown','document_sha256':'same'},'overall')[0])
+        self.assertIs(evaluate.case_prediction(by_hash,{'id':'positive','document_sha256':'same'},'overall'),True)
+        self.assertIs(evaluate.case_prediction(by_hash,{'id':'negative','document_sha256':'same'},'overall'),False)
+        self.assertIsNone(evaluate.case_prediction(by_hash,{'id':'unknown','document_sha256':'same'},'overall'))
 
-
-class IdentityAndPartitionTests(unittest.TestCase):
-    def test_mixed_inference_implementations_cannot_fit_bands(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            p=Path(tmp)
-            a=prediction('a');b=prediction('b')
-            a['inference_sha256']='old';b['inference_sha256']='new'
-            write_jsonl(p/'results',[a,b]);write_jsonl(p/'key',[])
-            with self.assertRaisesRegex(ValueError,'Mixed'):
-                evaluate.evaluate(p/'results',p/'key')
 
 if __name__ == '__main__':
     unittest.main()
