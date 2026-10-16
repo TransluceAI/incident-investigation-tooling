@@ -16,7 +16,7 @@ from .prompts import load_prompts, messages, schemas
 from .render import render_citable, windows
 from .schemas import AXES
 
-VERSION = "evidence-judge-v1"
+VERSION = "screening-judge-v1"
 
 
 class Corpus:

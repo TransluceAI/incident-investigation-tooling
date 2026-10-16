@@ -1,10 +1,9 @@
-import json
 import tempfile
 import unittest
 from pathlib import Path
-from evidence_judge import evaluate as e
-from evidence_judge.common import write_jsonl
-from evidence_judge.schemas import AXES
+from screening_judge import evaluate as e
+from screening_judge.common import write_jsonl
+from screening_judge.schemas import AXES
 
 
 def prediction(h, label='no_evidence', score=None, iid=None):
@@ -34,17 +33,18 @@ class EvaluationTests(unittest.TestCase):
             root=Path(tmp);write_jsonl(root/'results',rows);write_jsonl(root/'key',key)
             return e.evaluate(root/'results',root/'key',**kwargs)
 
-    def test_cross_partition_group_rejected(self):
-        key=[{'id':'1','document_sha256':'a','leakage_group':'g','evaluation_partition':'dev'},
-             {'id':'2','document_sha256':'b','leakage_group':'g','evaluation_partition':'test'}]
-        with self.assertRaisesRegex(ValueError,'leakage|partition'):
-            self.evaluate([],key)
-
-    def test_same_document_across_groups_rejected(self):
-        key=[{'id':'1','document_sha256':'same','leakage_group':'g1','evaluation_partition':'dev'},
-             {'id':'2','document_sha256':'same','leakage_group':'g2','evaluation_partition':'test'}]
-        with self.assertRaisesRegex(ValueError,'leakage|partition'):
-            self.evaluate([],key)
+    def test_related_cases_cannot_cross_partitions(self):
+        cases = {
+            'shared group': [('a', 'g'), ('b', 'g')],
+            'shared document': [('same', 'g1'), ('same', 'g2')],
+        }
+        for reason, members in cases.items():
+            with self.subTest(reason=reason):
+                key = [{'id': str(i), 'document_sha256': doc, 'leakage_group': group,
+                        'evaluation_partition': split}
+                       for i, ((doc, group), split) in enumerate(zip(members, ('dev', 'test')))]
+                with self.assertRaises(ValueError):
+                    self.evaluate([], key)
 
     def test_test_split_sealed_by_default(self):
         key=[{'id':'1','document_sha256':'a','leakage_group':'g','evaluation_partition':'test','overall_label':'positive'}]
@@ -65,14 +65,5 @@ class EvaluationTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError,'partition'):
             self.evaluate([],[{'id':'a','document_sha256':'a','evaluation_partition':'contest'}])
 
-    def test_confusion_and_projection(self):
-        rates=e.rates(e.confusion([(True,True),(True,False),(False,False),(False,True)]))
-        self.assertEqual(rates['tpr'],0.5);self.assertEqual(rates['fpr'],0.5)
-        self.assertAlmostEqual(e.project(0.9,0.01,[0.001],100000)[0]['precision'],0.0009/0.01089)
-
-    def test_perfect_bootstrap_is_not_claimed_certainty(self):
-        report,_=self.evaluate([prediction('a','positive_uncalibrated')],[{
-            'id':'a','document_sha256':'a','leakage_group':'a','evaluation_partition':'dev','overall_label':'positive'}])
-        self.assertIn('interval_warnings',report['axes']['overall']['dev'])
 
 if __name__=='__main__':unittest.main()

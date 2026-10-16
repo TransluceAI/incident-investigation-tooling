@@ -11,9 +11,9 @@ from types import SimpleNamespace as NS
 from unittest.mock import patch
 
 from test_pipeline import config, result
-from evidence_judge.common import sha256_text
+from screening_judge.common import sha256_text
 
-spec=importlib.util.spec_from_file_location('evidence_runner',Path(__file__).resolve().parents[1]/'scripts/inference_runner.py')
+spec=importlib.util.spec_from_file_location('screening_runner',Path(__file__).resolve().parents[1]/'scripts/inference_runner.py')
 r=importlib.util.module_from_spec(spec);spec.loader.exec_module(r)
 
 class Tokenizer:
@@ -30,20 +30,28 @@ class RunnerTests(unittest.TestCase):
         tokens=[prefix,'yes','"}']
         tables=[{i:NS(decoded_token=t,logprob=0)} for i,t in enumerate(tokens)]
         answer=NS(token_ids=[0,1,2],logprobs=tables)
-        self.assertIsNone(r.label_probabilities(answer))
+        for logprobs in (None, [None] * len(tokens), tables):
+            with self.subTest(logprobs=logprobs):
+                answer.logprobs = logprobs
+                self.assertIsNone(r.label_probabilities(answer))
+        answer.logprobs = tables
         tables[1]={1:NS(decoded_token='yes',logprob=math.log(.6)),
                    3:NS(decoded_token='no',logprob=math.log(.3)),
                    4:NS(decoded_token='ins',logprob=math.log(.1))}
         self.assertAlmostEqual(r.label_probabilities(answer)['yes'],.6)
 
-    def test_null_logprob_step_is_unavailable(self):
-        self.assertIsNone(r.label_probabilities(NS(token_ids=[1],logprobs=[None])))
-
-    def test_quoted_label_in_rationale_not_scored(self):
-        text='{"rationale":"say \\"label\\":\\"'
-        answer=NS(token_ids=[0,1],logprobs=[{0:NS(decoded_token=text,logprob=0)},
-                  {1:NS(decoded_token='yes',logprob=0)}])
-        self.assertIsNone(r.label_probabilities(answer))
+    def test_score_uses_top_level_label_after_quoted_rationale(self):
+        text = json.dumps({'rationale': 'say "label":"yes"', 'label': 'no'})
+        quoted = text.index('yes')
+        actual = text.rindex('no')
+        pieces = [text[:quoted], 'yes', text[quoted + 3:actual], 'no', text[actual + 2:]]
+        tables = [{i: NS(decoded_token=piece, logprob=0)} for i, piece in enumerate(pieces)]
+        for index, chosen, other, p_yes in ((1, 'yes', 'no', .9), (3, 'no', 'yes', .2)):
+            probabilities = {'yes': p_yes, 'no': 1 - p_yes - .05, 'ins': .05}
+            tables[index] = {token: NS(decoded_token=label, logprob=math.log(probabilities[label]))
+                             for token, label in ((index, chosen), (10, other), (11, 'ins'))}
+        answer = NS(token_ids=list(range(len(pieces))), logprobs=tables)
+        self.assertAlmostEqual(r.label_probabilities(answer)['yes'], .2)
 
     def test_combined_label_boundary_is_unavailable(self):
         answer=NS(token_ids=[0],logprobs=[{0:NS(decoded_token='{"label":"yes"}',logprob=0)}])
@@ -75,7 +83,7 @@ class RunnerTests(unittest.TestCase):
             row['text']='tampered';path.write_text(json.dumps(row)+'\n')
             with self.assertRaisesRegex(ValueError,'hash'):list(r.units(path))
 
-    def test_host_and_context_caps_reject_not_truncate(self):
+    def test_context_cap_rejects_instead_of_truncating(self):
         cfg=config();cfg['engine']['max_model_len']=1
         row={'unit_id':'w:hacking','axis':'hacking','shape':'text','text':'hello'}
         with self.assertRaisesRegex(ValueError,'Oversize'):

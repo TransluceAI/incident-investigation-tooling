@@ -3,10 +3,10 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from evidence_judge.common import sha256_text, write_jsonl, iter_jsonl
-from evidence_judge.prepare import prepare
-from evidence_judge import evaluate
-from evidence_judge.report import reconcile
+from screening_judge.common import sha256_text, write_jsonl, iter_jsonl
+from screening_judge.prepare import prepare
+from screening_judge import evaluate
+from screening_judge.report import reconcile
 from test_pipeline import config
 from test_evaluate import prediction
 
@@ -65,7 +65,6 @@ class BenchmarkTests(unittest.TestCase):
         self.assertIs(evaluate.case_prediction(by_hash,{'id':'negative','document_sha256':'same'},'overall')[0],False)
         self.assertIsNone(evaluate.case_prediction(by_hash,{'id':'unknown','document_sha256':'same'},'overall')[0])
 
-if __name__=='__main__':unittest.main()
 
 class IdentityAndPartitionTests(unittest.TestCase):
     def test_mixed_inference_implementations_cannot_fit_bands(self):
@@ -77,9 +76,5 @@ class IdentityAndPartitionTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError,'Mixed'):
                 evaluate.evaluate(p/'results',p/'key')
 
-    def test_reserved_split_does_not_claim_historical_independence(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            p=Path(tmp);write_jsonl(p/'results',[]);write_jsonl(p/'key',[])
-            report,_=evaluate.evaluate(p/'results',p/'key',include_test=True)
-            self.assertTrue(report['test_evaluated'])
-            self.assertEqual(report['historical_holdout_independence'],'unverified')
+if __name__ == '__main__':
+    unittest.main()

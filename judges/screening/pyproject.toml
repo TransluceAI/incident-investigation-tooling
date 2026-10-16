@@ -1,5 +1,5 @@
 [project]
-name = "evidence-judge"
+name = "screening-judge"
 version = "0.1.0"
 description = "Reusable, source-cited screening of preserved web evidence for hacking, AI-agent activity and agent coordination"
 requires-python = ">=3.10"
@@ -10,7 +10,7 @@ prepare = ["transformers"]
 gpu = ["transformers", "vllm"]
 
 [project.scripts]
-evidence-judge = "evidence_judge.pipeline:main"
+screening-judge = "screening_judge.pipeline:main"
 
 [build-system]
 requires = ["setuptools>=68"]
@@ -18,8 +18,8 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
 include-package-data = false
-packages = ["evidence_judge", "evidence_judge_config"]
-package-dir = {"" = "src", "evidence_judge_config" = "config"}
+packages = ["screening_judge", "screening_judge_config"]
+package-dir = {"" = "src", "screening_judge_config" = "config"}
 
 [tool.setuptools.package-data]
-evidence_judge_config = ["*.txt", "*.json", "axes/*.txt", "shapes/*.txt"]
+screening_judge_config = ["*.txt", "*.json", "axes/*.txt", "shapes/*.txt"]

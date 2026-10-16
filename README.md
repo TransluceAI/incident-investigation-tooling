@@ -13,6 +13,8 @@ Each tool lives in its own subdirectory with its own README.
 
 - [Qwen inference](inference/qwen/): Standalone offline vLLM inference with model profiles, Slurm scheduling, structured output, and resumable runs.
 
+- [Activity Screening Judge](judges/screening/): Screens preserved web evidence across datasets for hacking attempts, AI-agent activity, and coordination.
+
 - [Arquivo judge](judges/arquivo/): Screens preserved Arquivo.pt evidence for hacking attempts, with independent AI-agent and coordination assessments and source-cited review queues.
 
 ## Contributing
