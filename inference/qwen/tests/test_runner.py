@@ -485,7 +485,9 @@ class DecodingControlTests(unittest.TestCase):
                 calls.append(kwargs['sampling_params'])
                 first = len(calls) == 1
                 if first and stop_mode == 'signal':
-                    handlers[r.signal.SIGTERM](r.signal.SIGTERM, None)
+                    # A signal can land inside a buffered write, where print() raises.
+                    with patch('builtins.print', side_effect=RuntimeError('reentrant call inside BufferedWriter')):
+                        handlers[r.signal.SIGTERM](r.signal.SIGTERM, None)
                 if first and stop_mode in ('deadline', 'drain', 'slurm'):
                     clock[0] = 2
                 if first and stop_mode == 'adaptive_retry':

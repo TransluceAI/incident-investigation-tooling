@@ -95,6 +95,8 @@ class RequestRowTests(unittest.TestCase):
         self.assertEqual(content[0]['top_logprobs'], [{'token': '{', 'logprob': -0.2},
                                                       {'token': '[', 'logprob': -2.0}])
         self.assertIsNone(content[1]['logprob'])  # NaN is not valid JSON or evidence
+        tables[2] = {8: lp('{', 0.0, None), 9: lp('[', -2.0, None)}  # unranked: a certain token sorts first
+        self.assertEqual([c['token'] for c in r.final_logprobs(answer, 2)['content'][0]['top_logprobs']], ['{', '['])
         tables[3] = {11: lp('x', -1.0, 1)}  # sampled token absent from the table
         self.assertEqual(r.final_logprobs(answer, 2)['content'][1]['token'], None)
         for missing in (None, tables[:2]):

@@ -14,6 +14,7 @@ import math
 import os
 from pathlib import Path
 import signal
+import sys
 import time
 
 
@@ -202,9 +203,11 @@ def final_logprobs(answer, start, special_ids=()):
     for token_id, table in zip(ids[start:end], tables[start:end]):
         table = table or {}
         chosen = table.get(token_id)
-        ranked = sorted(table.values(), key=lambda c: (getattr(c, 'rank', None) is None,
-                                                       getattr(c, 'rank', None) or 0,
-                                                       -(value(c.logprob) or -math.inf)))
+        def order(candidate):
+            rank, lp = getattr(candidate, 'rank', None), value(candidate.logprob)
+            return (rank is None, rank or 0, math.inf if lp is None else -lp)
+
+        ranked = sorted(table.values(), key=order)
         content.append({'token': getattr(chosen, 'decoded_token', None),
                         'logprob': value(chosen.logprob) if chosen is not None else None,
                         'top_logprobs': [{'token': c.decoded_token, 'logprob': value(c.logprob)}
@@ -575,19 +578,25 @@ def run(resources):
         for line in (directory / 'timings.jsonl').read_text().splitlines():
             with contextlib.suppress(ValueError):  # a torn last line after a crash
                 longest_batch_seconds = max(longest_batch_seconds, json.loads(line)['batch_seconds'])
-    drain_at = deadline - max(args.drain_seconds, 2 * longest_batch_seconds)
     stopping = False
+
+    def drain_at():
+        return deadline - max(args.drain_seconds, 2 * longest_batch_seconds)
 
     def stop(signum, frame):
         nonlocal stopping
         stopping = True
-        print(json.dumps({'event': 'stop_requested', 'signal': signum}), flush=True)
+        # print() raises a reentrancy error if the signal lands inside a buffered
+        # write; an unbuffered write on the stdout descriptor is safe here.
+        line = (json.dumps({'event': 'stop_requested', 'signal': signum}) + '\n').encode()
+        with contextlib.suppress(OSError, ValueError):
+            os.write(sys.stdout.fileno(), line)
 
     signal.signal(signal.SIGTERM, stop)
     signal.signal(signal.SIGINT, stop)
     started = time.monotonic()
     llm = None
-    if len(done) < len(input_info) and not stopping and time.time() < drain_at:
+    if len(done) < len(input_info) and not stopping and time.time() < drain_at():
         from vllm import LLM, SamplingParams
         from vllm.sampling_params import StructuredOutputsParams
         import torch
@@ -635,7 +644,7 @@ def run(resources):
             startup['decoding_controls'] = controls
         write_json(directory / f'startup-{os.environ.get("SLURM_JOB_ID", os.getpid())}.json', startup)
         for batch in batches(units(args.fixtures, args.max_records), tokenizer, config, done):
-            if stopping or time.time() >= drain_at:
+            if stopping or time.time() >= drain_at():
                 break
             begin = time.monotonic()
             print(json.dumps({'event': 'batch_start', 'utc': now(), 'committed': len(done),
@@ -646,7 +655,7 @@ def run(resources):
             for attempt in range(1, controls['attempts'] + 1):
                 # Finish committing the completed attempt rather than start more
                 # GPU work after a stop request or deadline.
-                if attempt > 1 and (stopping or time.time() >= drain_at):
+                if attempt > 1 and (stopping or time.time() >= drain_at()):
                     break
                 params = sampling if legacy else [
                     sampling if sampling is not None and attempt == 1 else sampling_for(batch[i][0], attempt)
@@ -655,7 +664,6 @@ def run(resources):
                 outputs = llm.chat([batch[i][1] for i in pending], sampling_params=params,
                                    chat_template_kwargs=config['chat_template_kwargs'], use_tqdm=False)
                 longest_batch_seconds = max(longest_batch_seconds, time.monotonic() - attempt_started)
-                drain_at = deadline - max(args.drain_seconds, 2 * longest_batch_seconds)
                 if len(outputs) != len(pending):
                     raise RuntimeError('Missing model outputs; batch not committed')
                 retry = []
@@ -738,7 +746,6 @@ def run(resources):
                 progress['batch_retry_output_tokens'] = sum(a['output_tokens'] for r in results
                                                             for a in earlier_attempts(r))
             longest_batch_seconds = max(longest_batch_seconds, progress['batch_seconds'])
-            drain_at = deadline - max(args.drain_seconds, 2 * longest_batch_seconds)
             progress['longest_batch_seconds'] = longest_batch_seconds
             with open(directory / 'timings.jsonl', 'a') as stream:
                 stream.write(json.dumps(progress)+'\n')

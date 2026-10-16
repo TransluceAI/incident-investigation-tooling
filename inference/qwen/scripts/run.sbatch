@@ -29,10 +29,12 @@ import hashlib,json,sys
 from pathlib import Path
 run=Path(sys.argv[1])
 expected=json.loads((run/'hashes.json').read_text())
-for path in [Path(sys.argv[2])]+[run/name for name in ['config.json','inference_runner.py','run.sbatch','inputs.txt','python.txt']]:
+checks={Path(sys.argv[2]): sys.argv[2]}  # the input shard by absolute path, run files by name
+checks.update({run/name: name for name in ['config.json','inference_runner.py','run.sbatch','inputs.txt','python.txt']})
+for path,key in checks.items():
     with path.open('rb') as source:
         actual=hashlib.file_digest(source,'sha256').hexdigest()
-    if actual != expected[str(path)]:
+    if actual != expected[key]:
         raise RuntimeError(f'Input/config/code changed after submission: {path}')
 PYHASH
 ulimit -n 65536

@@ -1,4 +1,5 @@
 import contextlib
+from datetime import datetime, timedelta, timezone
 import importlib.util
 import io
 import json
@@ -36,14 +37,16 @@ class SubmissionTests(unittest.TestCase):
         self.input = self.root / 'input.jsonl'
         self.input.write_text((ROOT / 'examples/input.jsonl').read_text())
 
-    def invoke(self, *args, active=''):
+    def invoke(self, *args, active='', reject=False, run_dir=None):
         def scheduler(command, **kwargs):
+            if command[0] == 'sbatch' and reject:
+                raise subprocess.CalledProcessError(1, command)
             return active if command[0] == 'squeue' else '123;cluster\n'
 
         self.errors = io.StringIO()
         old_umask = os.umask(0o022)
         try:
-            with patch.object(sys, 'argv', ['submit', '--run-dir', str(self.run), *args]), \
+            with patch.object(sys, 'argv', ['submit', '--run-dir', str(run_dir or self.run), *args]), \
                     patch.object(submit.subprocess, 'check_output', side_effect=scheduler) as call, \
                     contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(self.errors):
                 submit.main()
@@ -51,9 +54,16 @@ class SubmissionTests(unittest.TestCase):
         finally:
             os.umask(old_umask)
 
-    def fresh(self, *args):
+    def fresh(self, *args, **kwargs):
         return self.invoke('--manifest', str(self.input), '--config', str(self.config),
-                           '--python', sys.executable, *args)
+                           '--python', sys.executable, *args, **kwargs)
+
+    def job_start_check(self, run_dir):
+        # The hash block that run.sbatch executes before launching the runner.
+        manifest = (self.run / 'inputs.txt').read_text().split()[0]
+        check = (self.run / 'run.sbatch').read_text().split("<<'PYHASH'\n")[1].split('\nPYHASH\n')[0]
+        return subprocess.run([sys.executable, '-I', '-', str(run_dir), manifest],
+                              input=check, capture_output=True, text=True)
 
     def test_snapshot_and_resume_preserve_runtime_and_code(self):
         call = self.fresh('--gpus', '4', '--partition', 'compute')
@@ -68,7 +78,8 @@ class SubmissionTests(unittest.TestCase):
                          (ROOT / 'scripts/run.sbatch').read_bytes())
         self.assertFalse((self.run / '.submission-pending').exists())
         hashes = json.loads((self.run / 'hashes.json').read_text())
-        self.assertIn(str(self.run / 'python.txt'), hashes)
+        self.assertIn('python.txt', hashes)  # run files by name, inputs by absolute path
+        self.assertIn(str(self.input.resolve()), hashes)
         self.config.write_text('{"changed": true}')  # original config is no longer used
         call = self.invoke('--resume')
         self.assertEqual(call.call_args.args[0][-3], sys.executable)
@@ -91,17 +102,39 @@ class SubmissionTests(unittest.TestCase):
         self.fresh()
         self.input.write_text('changed\n')
         self.invoke('--resume')  # submission checks run files only; each task hashes its shard
-        manifest = (self.run / 'inputs.txt').read_text().split()[0]
-        script = (self.run / 'run.sbatch').read_text()
-        check = script.split("<<'PYHASH'\n")[1].split('\nPYHASH\n')[0]
-        result = subprocess.run([sys.executable, '-I', '-', str(self.run), manifest],
-                                input=check, capture_output=True, text=True)
+        result = self.job_start_check(self.run)
         self.assertEqual(result.returncode, 1)
         self.assertIn('changed after submission', result.stderr)
         self.input.write_text((ROOT / 'examples/input.jsonl').read_text())
-        result = subprocess.run([sys.executable, '-I', '-', str(self.run), manifest],
-                                input=check, capture_output=True, text=True)
+        result = self.job_start_check(self.run)
         self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_resume_through_another_path_to_the_run_checks_the_same_files(self):
+        self.fresh()
+        alias = self.root / 'alias'
+        alias.symlink_to(self.root)
+        self.invoke('--resume', run_dir=alias / 'run')
+        result = self.job_start_check(alias / 'run')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        (self.run / 'config.json').write_text('{"changed": true}\n')
+        with self.assertRaises(SystemExit):
+            self.invoke('--resume', run_dir=alias / 'run')
+        self.assertIn('Saved config or code changed', self.errors.getvalue())
+
+    def test_wall_time_must_exceed_the_drain_margin(self):
+        soon = (datetime.now(timezone.utc) + timedelta(minutes=5)).isoformat()
+        for args in (('--time', '00:15:00'), ('--time', '00:10:00', '--drain-seconds', '600'), ('--stop-at', soon)):
+            with self.subTest(args=args):
+                with self.assertRaises(SystemExit):
+                    self.fresh(*args)
+                self.assertIn('drain margin', self.errors.getvalue())
+        self.fresh('--time', '00:15:01')
+
+    def test_rejected_submission_leaves_no_pending_marker(self):
+        with self.assertRaises(subprocess.CalledProcessError):
+            self.fresh(reject=True)
+        self.assertFalse((self.run / '.submission-pending').exists())
+        self.invoke('--resume')  # resubmission needs no manual cleanup
 
     def test_resume_reports_missing_saved_files(self):
         self.fresh()

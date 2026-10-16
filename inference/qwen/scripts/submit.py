@@ -12,6 +12,8 @@ import shutil
 import subprocess
 
 TOOL_DIR = Path(__file__).resolve().parent.parent
+# Snapshotted into the run directory and hashed by name, so any path to the run works.
+SAVED = ['config.json', 'inference_runner.py', 'run.sbatch', 'inputs.txt', 'python.txt']
 
 
 def pinned_python(path):
@@ -66,10 +68,13 @@ def main():
         if remaining < 60:
             p.error('--stop-at must be at least one minute in the future')
         duration = min(duration, remaining)
+    if duration <= args.drain_seconds:
+        p.error(f'The job would get {duration} seconds, not more than the {args.drain_seconds}-second drain margin; '
+                'lengthen --time/--stop-at or lower --drain-seconds')
     if args.resume:
         if args.config or args.manifest or args.shard_dir or args.python:
             p.error('Resume uses saved inputs/config; omit new input flags')
-        for name in ['inputs.txt', 'hashes.json', 'config.json', 'inference_runner.py', 'run.sbatch', 'python.txt']:
+        for name in ['hashes.json', *SAVED]:
             if not (run/name).is_file():
                 p.error(f'Incomplete run directory: missing {name}')
         paths = [Path(line) for line in (run/'inputs.txt').read_text().splitlines()]
@@ -122,14 +127,13 @@ def main():
             shutil.copyfile(TOOL_DIR/'scripts/run.sbatch', run/'run.sbatch')
             (run/'python.txt').write_text(str(python)+'\n')
             (run/'inputs.txt').write_text(''.join(str(path)+'\n' for path in paths))
-            saved = ['config.json','inference_runner.py','run.sbatch','inputs.txt','python.txt']
             hashes = {str(path): sha(path) for path in paths}
-            hashes.update({str(run/name):sha(run/name) for name in saved})
+            hashes.update({name: sha(run/name) for name in SAVED})
             (run/'hashes.json').write_text(json.dumps(hashes,indent=2)+'\n')
         if args.resume:
             # Each task re-verifies its own input shard at job start (run.sbatch).
             hashes = json.loads((run/'hashes.json').read_text())
-            if any(sha(path) != expected for path, expected in hashes.items() if Path(path).parent == run):
+            if any(sha(run/name) != hashes[name] for name in SAVED):
                 p.error('Saved config or code changed; use a new run directory')
         command = ['sbatch','--parsable',f'--partition={args.partition}','--nodes=1','--ntasks=1',
                    '--gres=gpu:1','--cpus-per-task=8','--mem=64G',
@@ -139,7 +143,11 @@ def main():
                    '--export=NIL',str(run/'run.sbatch'),str(run),
                    str(python),args.stop_at or '',str(args.drain_seconds)]
         (run/'.submission-pending').touch()
-        job = subprocess.check_output(command, text=True).strip().split(';')[0]
+        try:
+            job = subprocess.check_output(command, text=True).strip().split(';')[0]
+        except subprocess.CalledProcessError:
+            (run/'.submission-pending').unlink()  # sbatch rejected the request; nothing was queued
+            raise
         if not job.isdigit():
             raise RuntimeError('Unknown submission response: inspect squeue before retrying')
         with receipts.open('a') as f:
