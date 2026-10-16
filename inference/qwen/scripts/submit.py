@@ -72,10 +72,10 @@ def main():
     if args.resume:
         if args.config or args.manifest or args.shard_dir or args.python:
             p.error('Resume uses saved inputs/config; omit new input flags')
-        paths = [Path(line) for line in (run/'inputs.txt').read_text().splitlines()]
-        for name in ['config.json', 'inference_runner.py', 'run.sbatch', 'python.txt']:
+        for name in ['inputs.txt', 'hashes.json', 'config.json', 'inference_runner.py', 'run.sbatch', 'python.txt']:
             if not (run/name).is_file():
                 p.error(f'Incomplete run directory: missing {name}')
+        paths = [Path(line) for line in (run/'inputs.txt').read_text().splitlines()]
     else:
         if run.exists() and any(run.iterdir()):
             p.error('Choose a fresh run directory or use --resume')

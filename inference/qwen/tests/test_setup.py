@@ -40,11 +40,12 @@ class SubmissionTests(unittest.TestCase):
         def scheduler(command, **kwargs):
             return active if command[0] == 'squeue' else '123;cluster\n'
 
+        self.errors = io.StringIO()
         old_umask = os.umask(0o022)
         try:
             with patch.object(sys, 'argv', ['submit', '--run-dir', str(self.run), *args]), \
                     patch.object(submit.subprocess, 'check_output', side_effect=scheduler) as call, \
-                    contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                    contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(self.errors):
                 submit.main()
             return call
         finally:
@@ -83,6 +84,23 @@ class SubmissionTests(unittest.TestCase):
         self.input.write_text('changed\n')
         with self.assertRaises(SystemExit):
             self.invoke('--resume')
+
+    def test_resume_reports_missing_saved_files(self):
+        self.fresh()
+        for name in ('inputs.txt', 'hashes.json', 'config.json', 'inference_runner.py', 'run.sbatch', 'python.txt'):
+            with self.subTest(name=name):
+                saved = self.run / name
+                original = saved.read_bytes()
+                saved.unlink()
+                with self.assertRaises(SystemExit) as error:
+                    self.invoke('--resume')
+                self.assertEqual(error.exception.code, 2)
+                self.assertIn(f'Incomplete run directory: missing {name}', self.errors.getvalue())
+                saved.write_bytes(original)
+        self.input.unlink()
+        with self.assertRaises(SystemExit):
+            self.invoke('--resume')
+        self.assertIn('Each input must be a nonempty file', self.errors.getvalue())
 
     def test_shards_use_capped_array_concurrency(self):
         shards = self.root / 'shards'
