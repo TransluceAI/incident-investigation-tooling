@@ -2,7 +2,7 @@
 
 An LLM judge for screening preserved public-web evidence across datasets. It independently assesses hacking attempts, autonomous AI-agent activity, and agent coordination, then produces source-cited judgments and review queues.
 
-The judge supports captures and redirects, scanner reports, wiki content, messages, and general text. It preserves request context, decodes embedded URLs and programs as inert text, and splits long items into overlapping windows. Numbered source chunks let the model cite locations without copying escaped text. It never executes evidence or follows evidence URLs.
+The judge supports captures and redirects, scanner reports, wiki content, messages, and general text. It preserves request context, decodes embedded URLs and programs as inert text, and splits long items into overlapping windows that each repeat the item's context and provenance (or, when provenance is too long, its leading lines). Numbered source chunks let the model cite locations without copying escaped text. It never executes evidence or follows evidence URLs.
 
 This is exploratory evidence triage. Labels require human review, and source-location validation does not establish classification accuracy or a successful compromise. The local framework is tested; model accuracy and calibration have not yet been measured.
 
@@ -32,7 +32,9 @@ python -m pip install -e '.[prepare]'   # Also prepare inputs with Transformers
 
 Pass a resolved runner profile as `--engine`, for example `inference/qwen/.runtime/config/qwen3.8-27b-fp8.json` after its model download. Its `model` must be the local model path, because preparation counts tokens with that tokenizer. The `model_revision` field records the intended snapshot; it does not verify the weights at that path. The profile's transport `system_prompt` and `schema` are not used: each request carries the judge's own prompts and per-axis schema. Preparation writes the profile's engine and sampling settings to `engine.json` for the runner.
 
-The baseline profile disables thinking; the `thinking` and `thinking.controls` profiles enable it. Add `citation_constraints: true` to a copy of the profile and each request's schema is narrowed to the window's citable segments and chunk numbers, so constrained decoding cannot emit an unknown citation. Settings need comparative evaluation before choosing a default. `--label-logprobs K` (default 10, 0 disables) sets the logprob candidates requested for label scores.
+The baseline profile disables thinking; the `thinking` and `thinking.controls` profiles enable it. Settings need comparative evaluation before choosing a default.
+
+Each request's schema is narrowed to the window's citable segments and chunk numbers, so constrained decoding cannot emit an unknown citation; `--no-citation-constraints` sends the plain axis schema instead. Each prompt also describes the response fields one by one after the axis question, as vLLM's structured-output guide recommends, generated from the same schema. `--label-logprobs K` (default 10, 0 disables) sets the logprob candidates requested for label scores.
 
 ## Prepare and run
 
@@ -79,7 +81,7 @@ screening-judge report \
 - `summary.json`: item/request counts, validation status, control results, and assessments by axis and shape.
 - `item-results.jsonl`: per-item assessments and completion status for all three axes.
 - `judgments.jsonl`: committed judgments, including validation failures and resolved evidence for validated results.
-- `review-queue.jsonl`: positive windows with resolved citations; an item can contribute multiple windows.
+- `review-queue.jsonl`: every request needing a human, ranked by P(yes): verified positives on any axis, unverified positives, abstentions, and failures, each with its `queue_reason`. An item can contribute several rows. It carries no confidence band, because P(yes) is uncalibrated.
 - `failures.jsonl`, `pending.jsonl`, `unverified-candidates.jsonl`: failures, unfinished requests, and unresolved positive claims kept separate from negatives.
 - `near-misses.jsonl`, `injection-review.jsonl`: additional candidates for review.
 - `control-results.jsonl`: synthetic controls, excluded from corpus item counts. Request totals include controls.

@@ -94,7 +94,7 @@ class SharedRunnerContractTests(unittest.TestCase):
                           'text_sha256': sha256_text('ordinary public text')}])
             run = root / 'run'
             prepare(root / 'data', run, lambda chat: sum(len(m['content']) for m in chat), 15000,
-                    {**config(), 'citation_constraints': True}, with_controls=False)
+                    config(), with_controls=False)
             argv = ['runner', '--config', str(run / 'engine.json'), '--input-manifest', str(run / 'requests.jsonl'),
                     '--output-dir', str(run / 'outputs'), '--worker-id', '0']
             with patch.dict(sys.modules, modules), patch.object(runner.signal, 'signal'), \

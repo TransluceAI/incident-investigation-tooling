@@ -12,6 +12,12 @@ Schema-valid yes answers whose citations failed go to unverified-candidates.
 Windows answered no with P(yes) >= near_miss_threshold go to near-misses for
 recall audits; they are never counted as positive.
 
+The review queue holds every request needing a human: verified positives on any
+axis, unverified positives, abstentions, and failures, ranked by P(yes). It has
+no confidence band: P(yes) is uncalibrated, so it orders the queue and nothing
+more. A run expects exactly the requests in its requests.jsonl, so a second-pass
+run over a subset of requests reports only those.
+
 Outputs come from the shared runner (inference/qwen). Each committed row must
 answer exactly the prepared request: its custom_id and request hash are checked
 against requests.jsonl. Label scores are computed here from the raw logprobs.
@@ -105,11 +111,15 @@ def reconcile(run, output_dirs, thresholds=None, near_miss_threshold=0.2):
     by_item_axis = defaultdict(list)
     window_counts = Counter()
     seen = set()
+    windows = {}
     for w in iter_jsonl(run / "windows.jsonl"):
         window_counts[w["item_id"]] += 1
         for axis in AXES:
             uid = f"{w['window_id']}:{axis}"
+            if uid not in requested:
+                continue
             seen.add(uid)
+            windows[uid] = w
             expected[(w["item_id"], axis)].append(uid)
             row = outputs.get(uid)
             if row is None:
@@ -117,7 +127,7 @@ def reconcile(run, output_dirs, thresholds=None, near_miss_threshold=0.2):
                 continue
             probs = label_probabilities(row.get("logprobs")) if row.get("status") == "success" else None
             base = {"unit_id": uid, "item_id": w["item_id"], "axis": axis, "window_id": w["window_id"],
-                    "result": row.get("result"), "label_probs": probs,
+                    "result": row.get("result"), "label_probs": probs, "p_yes": (probs or {}).get("yes"),
                     "run_identity": row.get("run_identity"), "config_sha256": preparation["config_sha256"],
                     "source": items[w["item_id"]]["source"]}
             try:
@@ -133,8 +143,8 @@ def reconcile(run, output_dirs, thresholds=None, near_miss_threshold=0.2):
                     unverified.append({**fail, "validation_status": "unverified_candidate",
                                        "segment_sources": w["segment_sources"]})
                 continue
-            p_yes = (probs or {}).get("yes")
-            ok = {**base, "validation_status": "validated", "evidence": evidence, "p_yes": p_yes,
+            p_yes = base["p_yes"]
+            ok = {**base, "validation_status": "validated", "evidence": evidence,
                   "segment_sources": w["segment_sources"]}
             judgments.append(ok)
             by_item_axis[(w["item_id"], axis)].append(ok)
@@ -143,7 +153,7 @@ def reconcile(run, output_dirs, thresholds=None, near_miss_threshold=0.2):
     stray = set(outputs) - seen
     if stray:
         raise ValueError(f"Outputs contain {len(stray)} units not in this run")
-    results, queue = [], []
+    results = []
     for item_id, item in items.items():
         axes = {}
         excluded = coverage[item_id]["status"] != "prepared" or not coverage[item_id]["windows"]
@@ -156,12 +166,8 @@ def reconcile(run, output_dirs, thresholds=None, near_miss_threshold=0.2):
             if yes:
                 best = max(yes, key=lambda r: -1 if r["p_yes"] is None else r["p_yes"])
                 assessment = grade(best["p_yes"], thresholds, axis)
-                for r in yes:
-                    queue.append({**r, "source": item["source"], "shape": item["shape"],
-                                  "request_urls": item["request_urls"], "assessment": assessment,
-                                  **({"findings_cyberattack": [FINDINGS_CYBERATTACK[c] for c in
-                                                               dict.fromkeys(r["result"]["categories"])]}
-                                     if axis == "hacking" else {})})
+            elif not n and not excluded:
+                assessment = "not_requested"  # e.g. a second pass over selected requests
             elif excluded or len(rows) < n:
                 assessment = "incomplete"
             else:
@@ -179,7 +185,38 @@ def reconcile(run, output_dirs, thresholds=None, near_miss_threshold=0.2):
                         "classifier_sha256": preparation["classifier_sha256"],
                         "inference_sha256": inference_hash,
                         "axes": axes})
+    queue = review_queue(judgments, items)
     return config, results, judgments, failures, pending, unverified, near, queue
+
+
+QUEUE_ORDER = ("positive", "unverified_positive", "abstention", "failure")
+
+
+def queue_reason(judgment):
+    result = judgment.get("result") if isinstance(judgment.get("result"), dict) else {}
+    if judgment["validation_status"] == "validated":
+        return {"yes": "positive", "insufficient_evidence": "abstention"}.get(result.get("label"))
+    if result.get("label") == "yes" and judgment.get("status") == "success":
+        return "unverified_positive"
+    return "failure"
+
+
+def review_queue(judgments, items):
+    """Positives on any axis, unverified positives, abstentions and failures, by P(yes)."""
+    queue = []
+    for j in judgments:
+        reason = queue_reason(j)
+        if reason is None:
+            continue
+        item = items[j["item_id"]]
+        row = {**j, "queue_reason": reason, "shape": item["shape"], "request_urls": item["request_urls"]}
+        if j["axis"] == "hacking" and reason in ("positive", "unverified_positive"):
+            categories = j["result"].get("categories")
+            row["findings_cyberattack"] = [FINDINGS_CYBERATTACK[c] for c in dict.fromkeys(categories or ())
+                                           if c in FINDINGS_CYBERATTACK]
+        queue.append(row)
+    return sorted(queue, key=lambda r: (r["p_yes"] is None, -(r["p_yes"] or 0),
+                                        QUEUE_ORDER.index(r["queue_reason"]), r["unit_id"]))
 
 
 def _bucket(n):
@@ -216,6 +253,7 @@ def write_report(dest, config, results, judgments, failures, pending, unverified
         "validated": sum(j["validation_status"] == "validated" for j in judgments),
         "failed": len(failures), "pending": len(pending), "unverified_candidates": len(unverified),
         "near_misses": len(near), "assessments": by_axis,
+        "review_queue": dict(Counter(q["queue_reason"] for q in queue)),
         "assessments_by_shape": {a: {s: dict(Counter(r["axes"][a]["assessment"] for r in results if r["shape"] == s))
                                      for s in sorted({r["shape"] for r in results})} for a in AXES},
         "positive_rate_by_window_count": window_rate,
