@@ -2,10 +2,7 @@
 
 Open source tools for tracking rogue AI agent swarms.
 
-In 2026, autonomous AI agents were found operating outside their intended
-environments, including a coordinated breach of Hugging Face by OpenAI
-evaluation agents. This repo collects tools volunteers use to find and track
-that activity.
+This repository collects tools for investigating autonomous AI-agent activity.
 
 Each tool lives in its own subdirectory with its own README.
 
@@ -17,7 +14,7 @@ Each tool lives in its own subdirectory with its own README.
 
 ## Contributing
 
-Contributions are welcome. Follow the rules in [CONTRIBUTING.md](CONTRIBUTING.md) and open a pull request.
+Contributions are welcome. Put each tool in its own subdirectory with a README covering installation and usage, add it to the Tool Index, and open a pull request. Keep credentials, private data, and large datasets outside this repository. Contributions use the repository’s [license](LICENSE).
 
 ## License
 
