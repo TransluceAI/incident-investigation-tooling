@@ -82,7 +82,7 @@ screening-judge report \
 - `review-queue.jsonl`: every request needing a human: verified positives on any axis, unverified positives, abstentions, and failures, each with its `queue_reason`, in that order. Within each reason it is sorted by descending `confidence` (missing scores last), then by `p_yes`. An item can contribute several rows.
 - `failures.jsonl`, `pending.jsonl`, `unverified-candidates.jsonl`: failures, unfinished requests, and unresolved positive claims kept separate from negatives.
 - `near-misses.jsonl`, `injection-review.jsonl`: additional candidates for review.
-- `control-results.jsonl`: synthetic controls, excluded from corpus item counts. Request totals include controls. In a pass-2 report, control axes that were not selected are untested: they count in `controls.not_requested`, not in `passed` or `total`.
+- `control-results.jsonl`: synthetic controls, excluded from corpus item counts. Request totals include controls. Runs prepared with `--no-controls` have no control checks and zero control counts. In a pass-2 report, control axes that were not selected are untested: they count in `controls.not_requested`, not in `passed` or `total`.
 
 Reports check prepared artifact hashes, worker configuration against `engine.json`, membership in each worker's selected manifest, and that each result's `request_sha256` matches its prepared request. Positive judgments require schema validity and resolved citations; action references must cite resolved evidence. The model's free-text `location` is unverified. Archive replay responses cannot establish attack success.
 

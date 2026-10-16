@@ -388,6 +388,27 @@ class ReportSuccessTests(unittest.TestCase):
     setUp = PipelineTests.setUp
     prepare = PipelineTests.prepare
     record = PipelineTests.record
+
+    def test_report_without_controls_has_no_control_checks(self):
+        self.prepare([self.record()])
+        summary = write_report(self.run/'report', *reconcile(self.run, []), None)
+        self.assertEqual(summary['controls'],
+                         {'checks': [], 'passed': 0, 'total': 0, 'not_requested': 0})
+        self.assertEqual(list(iter_jsonl(self.run/'report/control-results.jsonl')), [])
+        self.assertEqual(summary['pending'], 3)
+
+    def test_requested_controls_without_outputs_still_count(self):
+        write_jsonl(self.data / 'resources/sample/records.jsonl', [self.record()])
+        self.run = self.root / 'run'
+        prepare(self.data, self.run, lambda chat: sum(len(m['content']) for m in chat),
+                15000, config(), with_controls=True)
+        summary = write_report(self.run/'report', *reconcile(self.run, []), None)
+        scored = summary['controls']
+        self.assertEqual((scored['passed'], scored['total'], scored['not_requested']), (0, 25, 0))
+        self.assertTrue(all(c['passed'] is False for c in scored['checks']))
+        self.assertEqual(len(list(iter_jsonl(self.run/'report/control-results.jsonl'))),
+                         len(controls.CONTROLS))
+
     def test_verified_positive_and_failed_citation_are_separate(self):
         self.prepare([self.record()])
         w=json.loads((self.run/'windows.jsonl').read_text().splitlines()[0])

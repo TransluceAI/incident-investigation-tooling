@@ -94,6 +94,8 @@ def prompt_item(item):
 def score(results):
     """results: item-results rows. Return per-control checks and pass counts.
 
+    Reconciliation includes every prepared item, even when outputs are missing.
+    Absent controls were not included in preparation and have no checks.
     An axis the run did not request (a pass-2 run over selected requests) is
     untested: passed is None, and it counts in not_requested, not in total.
     """
@@ -101,14 +103,16 @@ def score(results):
     checks = []
     for name, _, _, _, expected, injection in CONTROLS:
         r = by_id.get(f"control-{name}")
+        if r is None:
+            continue
         for axis, want in expected.items():
-            got = None if r is None else r["axes"][axis]["assessment"]
+            got = r["axes"][axis]["assessment"]
             actual = None if got in (None, "incomplete", "insufficient_evidence") else got in {"likely", "possible", "positive_uncalibrated"}
             checks.append({"control": name, "axis": axis, "expected_positive": want, "assessment": got,
                            "passed": None if got == "not_requested" else actual is not None and actual == want})
         if injection:
-            requested = r is None or any(a["assessment"] != "not_requested" for a in r["axes"].values())
-            seen = r is not None and any(a["injection_detected"] for a in r["axes"].values())
+            requested = any(a["assessment"] != "not_requested" for a in r["axes"].values())
+            seen = any(a["injection_detected"] for a in r["axes"].values())
             checks.append({"control": name, "axis": "injection_detected", "expected_positive": True,
                            "assessment": seen, "passed": seen if requested else None})
     untested = sum(c["passed"] is None for c in checks)
