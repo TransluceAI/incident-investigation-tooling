@@ -1,4 +1,5 @@
 import json
+import os
 from pathlib import Path
 import tempfile
 import unittest
@@ -29,6 +30,18 @@ class FakeTokenizer:
 
     def decode(self, ids, skip_special_tokens=True):
         return ''.join(chr(i - 100) for i in ids if i >= 100)
+
+
+class DeadlineTests(unittest.TestCase):
+    def test_effective_deadline_uses_earlier_cutoff(self):
+        with patch.dict(os.environ, {'SLURM_JOB_END_TIME': '200'}):
+            self.assertEqual(r.job_deadline(None), 200)
+            self.assertEqual(r.job_deadline('1970-01-01T00:01:40+00:00'), 100)
+            self.assertEqual(r.job_deadline('1970-01-01T00:05:00+00:00'), 200)
+        with patch.dict(os.environ, {'SLURM_JOB_END_TIME': ''}):
+            self.assertEqual(r.job_deadline(None), float('inf'))
+            with self.assertRaisesRegex(ValueError, 'timezone'):
+                r.job_deadline('2026-10-16T12:00:00')
 
 
 class RecoveryTests(unittest.TestCase):
@@ -421,7 +434,7 @@ class DecodingControlTests(unittest.TestCase):
         self._run_retry_case()
 
     def test_retry_stops_after_signal_or_deadline_and_commits_completed_attempt(self):
-        for mode in ('signal', 'deadline'):
+        for mode in ('signal', 'deadline', 'drain', 'slurm', 'no_load'):
             with self.subTest(mode=mode):
                 self._run_retry_case(mode)
 
@@ -444,7 +457,7 @@ class DecodingControlTests(unittest.TestCase):
                 first = len(calls) == 1
                 if first and stop_mode == 'signal':
                     handlers[r.signal.SIGTERM](r.signal.SIGTERM, None)
-                if first and stop_mode == 'deadline':
+                if first and stop_mode in ('deadline', 'drain', 'slurm'):
                     clock[0] = 2
                 return [SimpleNamespace(
                     prompt_token_ids=tokenizer.apply_chat_template(chat, **kwargs['chat_template_kwargs']),
@@ -462,10 +475,11 @@ class DecodingControlTests(unittest.TestCase):
             'vllm.sampling_params': SimpleNamespace(StructuredOutputsParams=lambda **k: k,
                                                     RepetitionDetectionParams=lambda **k: ('Repetition', k))}
         self.cfg.update(model='/fake/qwen', system_prompt='Return JSON.', schema=self.schema,
-                        host_batch_tokens=40000, host_batch_records=4,
+                        host_batch_tokens=40000, host_batch_records=2,
                         retry={'max_attempts': 2, 'temperatures': [0.7]})
         self.cfg['sampling']['seed'] = 5
         with tempfile.TemporaryDirectory() as tmp, patch.dict(sys.modules, modules), \
+                patch.dict(os.environ, {'SLURM_JOB_END_TIME': '3' if stop_mode == 'slurm' else ''}), \
                 patch.object(r.signal, 'signal', side_effect=lambda sig, fn: handlers.update({sig: fn})), \
                 patch.object(r.time, 'time', side_effect=lambda: clock[0]), \
                 contextlib.redirect_stdout(io.StringIO()):
@@ -474,11 +488,17 @@ class DecodingControlTests(unittest.TestCase):
             cfg.write_text(json.dumps(self.cfg))
             manifest.write_text(''.join(json.dumps({**self.row, 'unit_id': f'e:w{i}', 'chunk_idx': i,
                                                     'text': 'evidence', 'text_sha256': r.digest(b'evidence')})+'\n'
-                                        for i in range(2)))
+                                        for i in range(4 if stop_mode in ('drain', 'slurm') else 2)))
             argv = ['runner', '--config', str(cfg), '--input-manifest', str(manifest),
                     '--output-dir', str(root/'outputs'), '--worker-id', '0']
             if stop_mode == 'deadline':
-                argv += ['--stop-at', '1970-01-01T00:00:01+00:00']
+                argv += ['--stop-at', '1970-01-01T00:00:01+00:00', '--drain-seconds', '0']
+            elif stop_mode == 'drain':
+                argv += ['--stop-at', '1970-01-01T00:00:03+00:00', '--drain-seconds', '1']
+            elif stop_mode == 'slurm':
+                argv += ['--drain-seconds', '1']
+            elif stop_mode == 'no_load':
+                argv += ['--stop-at', '1970-01-01T00:00:03+00:00', '--drain-seconds', '4']
             with patch.object(sys, 'argv', argv):
                 if stop_mode:
                     with self.assertRaises(SystemExit) as stopped:
@@ -487,12 +507,18 @@ class DecodingControlTests(unittest.TestCase):
                 else:
                     r.main()  # every unit succeeded after retry: no SystemExit(2)
             worker = root/'outputs/worker-0'
+            if stop_mode == 'no_load':
+                self.assertEqual(loads, [])
+                self.assertEqual(list(worker.glob('part-*.jsonl')), [])
+                self.assertEqual(json.loads((worker/'summary.json').read_text())['unfinished'], 2)
+                return
             rows = [json.loads(line) for line in (worker/'part-000000.jsonl').read_text().splitlines()]
             summary = json.loads((worker/'summary.json').read_text())
         if stop_mode:
             self.assertEqual(len(calls), 1)
             self.assertEqual([row['status'] for row in rows], ['failed', 'success'])
             self.assertEqual(summary['committed'], 2)
+            self.assertEqual(summary['unfinished'], 2 if stop_mode in ('drain', 'slurm') else 0)
             self.assertEqual(summary['failed'], 1)
             self.assertEqual(summary['retried_units'], 0)
             return

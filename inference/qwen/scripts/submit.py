@@ -41,8 +41,12 @@ def main():
     p.add_argument('--gpus', type=int, choices=range(1, 9), default=1)
     p.add_argument('--time', default='01:00:00', help='Per-task HH:MM:SS')
     p.add_argument('--stop-at', help='Optional absolute deadline in ISO 8601 with timezone; no default')
+    p.add_argument('--drain-seconds', type=int, default=300,
+                   help='Stop starting batches/retries before the deadline (default: 300 seconds)')
     p.add_argument('--resume', action='store_true')
     args = p.parse_args()
+    if args.drain_seconds < 0:
+        p.error('--drain-seconds must be nonnegative')
     user = pwd.getpwuid(os.getuid()).pw_name
     run = args.run_dir.expanduser().absolute()
     if run.is_symlink() or (run.exists() and run.stat().st_uid != os.getuid()):
@@ -144,7 +148,7 @@ def main():
                    f'--array=0-{len(paths)-1}%{min(args.gpus,len(paths))}',
                    '--job-name=qwen-batch',f'--chdir={run}',f'--output={run}/logs/%A_%a.log',
                    '--export=NIL',str(run/'run.sbatch'),str(run),
-                   str(python),args.stop_at or '']
+                   str(python),args.stop_at or '',str(args.drain_seconds)]
         (run/'.submission-pending').touch()
         job = subprocess.check_output(command, text=True).strip().split(';')[0]
         if not job.isdigit():

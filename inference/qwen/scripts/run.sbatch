@@ -4,6 +4,7 @@ umask 022
 run=$1
 python=$2
 stop_at=${3:-}
+drain_seconds=${4:-300}
 worker=${SLURM_ARRAY_TASK_ID:-0}
 mapfile -t inputs < "$run/inputs.txt"
 manifest=${inputs[$worker]}
@@ -37,7 +38,7 @@ PYHASH
 ulimit -n 65536
 command=(srun --ntasks=1 "$python" -I "$run/inference_runner.py" \
   --config "$run/config.json" --input-manifest "$manifest" \
-  --output-dir "$run/outputs" --worker-id "$worker" --resume)
+  --output-dir "$run/outputs" --worker-id "$worker" --resume --drain-seconds "$drain_seconds")
 if [[ -n "$stop_at" ]]; then
   command+=(--stop-at "$stop_at")
   remaining=$("$python" -I -c 'import sys,time; from datetime import datetime; print(int(datetime.fromisoformat(sys.argv[1].replace("Z","+00:00")).timestamp()-time.time()))' "$stop_at")

@@ -99,8 +99,14 @@ Preflight uses the real tokenizer without loading GPU weights:
 Each task requests 8 CPUs and 64 GiB RAM. `--partition` defaults to `all`.
 `--time` is per-task wall time. Optional `--stop-at` accepts an absolute ISO 8601
 deadline with timezone and must be repeated on resume. The worker also enforces
-that deadline after queueing. New submissions snapshot the runner, batch script,
-configuration and selected Python path; input files are referenced and hashed.
+that deadline after queueing. The runner uses the earlier of `--stop-at` and
+Slurm's allocated end time. It stops starting batches and retries 300 seconds
+before that cutoff, allowing ongoing generation and writes to finish. Adjust
+`--drain-seconds` on submission or resume for the expected batch duration,
+including for jobs shorter than five minutes. A batch that outlasts the margin
+can still be terminated at the hard cutoff. New submissions snapshot the runner,
+batch script, configuration and selected Python path; input files are referenced
+and hashed.
 Run files use mode 0755/0644 and are readable by other cluster users with access
 to the parent directory. Place sensitive workloads in an appropriately restricted
 parent directory.

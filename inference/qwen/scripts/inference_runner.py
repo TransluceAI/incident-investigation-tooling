@@ -468,6 +468,23 @@ def metrics_snapshot(llm):
     return {'available': True, 'preemptions': sum(preempt) if preempt else None, 'metrics': metrics}
 
 
+def job_deadline(stop_at):
+    """Earlier of the caller's absolute cutoff and the allocated Slurm end time."""
+    deadline = float('inf')
+    if stop_at:
+        try:
+            stop = datetime.fromisoformat(stop_at.replace('Z', '+00:00'))
+        except ValueError:
+            raise ValueError('--stop-at must be an ISO 8601 timestamp') from None
+        if stop.tzinfo is None:
+            raise ValueError('--stop-at must include its timezone')
+        deadline = stop.timestamp()
+    slurm_end = os.environ.get('SLURM_JOB_END_TIME')
+    if slurm_end:
+        deadline = min(deadline, int(slurm_end))
+    return deadline
+
+
 def run(resources):
     parser = argparse.ArgumentParser()
     parser.add_argument('--config', required=True)
@@ -475,21 +492,21 @@ def run(resources):
     parser.add_argument('--output-dir', required=True)
     parser.add_argument('--worker-id', type=int, required=True)
     parser.add_argument('--stop-at', help='Optional ISO 8601 deadline with timezone')
+    parser.add_argument('--drain-seconds', type=int, default=300,
+                        help='Stop starting batches/retries this many seconds before the deadline (default: 300)')
     parser.add_argument('--max-records', type=int)
     parser.add_argument('--resume', action='store_true')
     parser.add_argument('--validate-only', action='store_true')
     args = parser.parse_args()
     if args.worker_id < 0 or (args.max_records is not None and args.max_records < 1):
         parser.error('worker-id must be nonnegative and max-records positive')
-    deadline = float('inf')
-    if args.stop_at:
-        try:
-            stop = datetime.fromisoformat(args.stop_at.replace('Z', '+00:00'))
-        except ValueError:
-            parser.error('--stop-at must be an ISO 8601 timestamp')
-        if stop.tzinfo is None:
-            parser.error('--stop-at must include its timezone')
-        deadline = stop.timestamp()
+    if args.drain_seconds < 0:
+        parser.error('--drain-seconds must be nonnegative')
+    try:
+        deadline = job_deadline(args.stop_at)
+    except ValueError as exc:
+        parser.error(str(exc))
+    drain_at = deadline - args.drain_seconds
     if time.time() >= deadline:
         raise RuntimeError('Deadline has passed')
     config = json.loads(Path(args.config).read_text())
@@ -562,9 +579,7 @@ def run(resources):
     signal.signal(signal.SIGINT, stop)
     started = time.monotonic()
     llm = None
-    if len(done) < len(input_info):
-        if time.time() >= deadline:
-            raise RuntimeError('Deadline reached before model load')
+    if len(done) < len(input_info) and not stopping and time.time() < drain_at:
         from vllm import LLM, SamplingParams
         from vllm.sampling_params import StructuredOutputsParams
         import torch
@@ -611,7 +626,7 @@ def run(resources):
             startup['decoding_controls'] = controls
         write_json(directory / f'startup-{os.environ.get("SLURM_JOB_ID", os.getpid())}.json', startup)
         for batch in batches(units(args.fixtures, args.max_records), tokenizer, config, done):
-            if stopping or time.time() >= deadline:
+            if stopping or time.time() >= drain_at:
                 break
             begin = time.monotonic()
             print(json.dumps({'event': 'batch_start', 'utc': now(), 'committed': len(done),
@@ -622,7 +637,7 @@ def run(resources):
             for attempt in range(1, controls['attempts'] + 1):
                 # Finish committing the completed attempt rather than start more
                 # GPU work after a stop request or deadline.
-                if attempt > 1 and (stopping or time.time() >= deadline):
+                if attempt > 1 and (stopping or time.time() >= drain_at):
                     break
                 params = sampling if legacy else [
                     sampling if sampling is not None and attempt == 1 else sampling_for(batch[i][0], attempt)

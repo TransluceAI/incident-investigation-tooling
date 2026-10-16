@@ -59,7 +59,7 @@ class SubmissionTests(unittest.TestCase):
         command = call.call_args.args[0]
         self.assertIn('--array=0-0%1', command)
         self.assertIn('--partition=compute', command)
-        self.assertEqual(command[-2], sys.executable)
+        self.assertEqual(command[-3], sys.executable)
         self.assertEqual((self.run / 'inference_runner.py').read_bytes(),
                          (ROOT / 'scripts/inference_runner.py').read_bytes())
         self.assertEqual((self.run / 'run.sbatch').read_bytes(),
@@ -69,7 +69,7 @@ class SubmissionTests(unittest.TestCase):
         self.assertIn(str(self.run / 'python.txt'), hashes)
         self.config.write_text('{"changed": true}')  # original config is no longer used
         call = self.invoke('--resume')
-        self.assertEqual(call.call_args.args[0][-2], sys.executable)
+        self.assertEqual(call.call_args.args[0][-3], sys.executable)
         self.assertEqual((self.run / 'config.json').read_text(), '{}\n')
 
     def test_resume_rejects_changed_files_active_jobs_and_unknown_submission(self):
@@ -92,6 +92,12 @@ class SubmissionTests(unittest.TestCase):
         call = self.invoke('--shard-dir', str(shards), '--config', str(self.config),
                            '--python', sys.executable, '--gpus', '2')
         self.assertIn('--array=0-2%2', call.call_args.args[0])
+
+    def test_drain_margin_is_forwarded_and_validated(self):
+        call = self.fresh('--drain-seconds', '90')
+        self.assertEqual(call.call_args.args[0][-1], '90')
+        with self.assertRaises(SystemExit):
+            self.invoke('--resume', '--drain-seconds', '-1')
 
     def test_resume_rejects_replacement_runtime(self):
         self.fresh()
