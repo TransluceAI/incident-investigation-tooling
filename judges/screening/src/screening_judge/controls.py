@@ -107,7 +107,7 @@ def score(results):
             continue
         for axis, want in expected.items():
             got = r["axes"][axis]["assessment"]
-            actual = None if got in (None, "incomplete", "insufficient_evidence") else got in {"likely", "possible", "positive_uncalibrated"}
+            actual = None if got in (None, "incomplete", "insufficient_evidence") else got == "positive"
             checks.append({"control": name, "axis": axis, "expected_positive": want, "assessment": got,
                            "passed": None if got == "not_requested" else actual is not None and actual == want})
         if injection:

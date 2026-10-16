@@ -12,21 +12,16 @@ def prediction(h, label='no_evidence', score=None, iid=None):
 
 
 class EvaluationTests(unittest.TestCase):
-    def test_positive_band_uses_positive_window_score(self):
-        row=prediction('x','positive_uncalibrated',.99)
-        row['axes']['hacking']['p_yes_positive_max']=.4
-        self.assertEqual(e.predict([row],'hacking'),(True,.4))
-
-    def test_tied_scores_never_split(self):
-        self.assertIsNone(e.choose_threshold([(False,True,0.8),(True,True,0.8)],0.9))
+    def test_verified_positive_is_predicted_positive(self):
+        self.assertIs(e.predict([prediction('x','positive')],'hacking'),True)
 
     def test_unknown_states_not_negatives(self):
         p=prediction('x','new_invalid_state')
-        self.assertEqual(e.predict([p],'hacking')[0],'undecided')
+        self.assertEqual(e.predict([p],'hacking'),'undecided')
 
     def test_hash_with_multiple_event_contexts_is_ambiguous(self):
-        rows=[prediction('x','no_evidence',iid='a'),prediction('x','positive_uncalibrated',iid='b')]
-        self.assertEqual(e.predict(rows,'hacking')[0],'ambiguous')
+        rows=[prediction('x','no_evidence',iid='a'),prediction('x','positive',iid='b')]
+        self.assertEqual(e.predict(rows,'hacking'),'ambiguous')
 
     def evaluate(self, rows, key, **kwargs):
         with tempfile.TemporaryDirectory() as tmp:
@@ -48,13 +43,13 @@ class EvaluationTests(unittest.TestCase):
 
     def test_test_split_sealed_by_default(self):
         key=[{'id':'1','document_sha256':'a','leakage_group':'g','evaluation_partition':'test','overall_label':'positive'}]
-        report,_=self.evaluate([prediction('a','positive_uncalibrated')],key)
+        report=self.evaluate([prediction('a','positive')],key)
         self.assertNotIn('test',report['axes']['overall'])
 
     def test_coverage_and_missing_axis_labels(self):
         key=[{'id':str(i),'document_sha256':str(i),'leakage_group':str(i),
               'evaluation_partition':'dev','overall_label':'positive'} for i in range(3)]
-        report,_=self.evaluate([prediction('0','positive_uncalibrated'),prediction('1','insufficient_evidence')],key)
+        report=self.evaluate([prediction('0','positive'),prediction('1','insufficient_evidence')],key)
         dev=report['axes']['overall']['dev']
         self.assertEqual((dev['tp'],dev['missing'],dev['undecided']),(1,1,1))
         self.assertAlmostEqual(dev['coverage'],1/3)

@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import Callable
 
 from . import arquivo_ledger, benchmark, controls, records, shapes
-from .common import atomic_write_text, sha256_file, sha256_text, write_jsonl, classifier_hash
+from .common import atomic_write_text, sha256_file, sha256_text, write_jsonl
 from .prompts import load_prompts, messages, schemas
 from .render import render_citable, windows
 from .schemas import AXES, citation_schema
@@ -248,7 +248,6 @@ def prepare(data_root, out, count, window_tokens, config_template, with_controls
                "excluded_integrity": sum(c["status"] == "excluded_integrity" for c in coverage),
                "gaps": dict(Counter(g["gap"] for g in gaps)),
                "config_sha256": sha256_file(out / "config.json"),
-               "classifier_sha256": classifier_hash(config),
                "artifact_hashes": {name: sha256_file(out / name) for name in
                                    ("requests.jsonl", "engine.json", "windows.jsonl", "items.jsonl",
                                     "coverage.jsonl", "gaps.jsonl")}}

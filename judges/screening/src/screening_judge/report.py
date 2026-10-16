@@ -1,9 +1,7 @@
 """Reconcile committed outputs into per-item, per-axis results and review queues.
 
 Item assessment per axis:
-- positive: some window answered yes AND its citations resolved. With calibrated
-  thresholds the positive is graded likely (P(yes) >= t_likely) or possible;
-  without them it is positive_uncalibrated.
+- positive: some window answered yes AND its citations resolved.
 - incomplete: no verified positive and some expected window failed or is pending.
   Failures are never negatives.
 - insufficient_evidence / no_evidence: every window validated and none positive.
@@ -86,16 +84,7 @@ def load_outputs(dirs, engine, manifests):
     return outputs, inference_hash
 
 
-def grade(p_yes, thresholds, axis):
-    t = (thresholds or {}).get("axes", {}).get(axis)
-    if not t:
-        return "positive_uncalibrated"
-    if p_yes is None:
-        return "positive_uncalibrated"
-    return "likely" if p_yes >= t["t_likely"] else "possible"
-
-
-def reconcile(run, output_dirs, thresholds=None, near_miss_threshold=0.2):
+def reconcile(run, output_dirs, near_miss_threshold=0.2):
     run = Path(run)
     config = json.loads((run / "config.json").read_text())
     engine = json.loads((run / "engine.json").read_text())
@@ -106,8 +95,6 @@ def reconcile(run, output_dirs, thresholds=None, near_miss_threshold=0.2):
     for name, digest in preparation["artifact_hashes"].items():
         if sha256_file(run / name) != digest:
             raise ValueError("Prepared artifact hash mismatch: " + name)
-    if thresholds is not None and thresholds.get("classifier_sha256") != preparation["classifier_sha256"]:
-        raise ValueError("Threshold config does not match prepared run")
     coverage = {c["item_id"]: c for c in iter_jsonl(run / "coverage.jsonl")}
     manifests = {digest: run / name for name, digest in preparation["artifact_hashes"].items()
                  if name == "requests.jsonl" or name.startswith("shards/")}
@@ -115,8 +102,6 @@ def reconcile(run, output_dirs, thresholds=None, near_miss_threshold=0.2):
     # preparation.json hashes requests.jsonl and engine.json, so this names the exact execution.
     preparation_sha256 = sha256_file(run / "preparation.json")
     outputs, inference_hash = load_outputs(output_dirs, engine, manifests)
-    if thresholds is not None and thresholds.get("inference_sha256") != inference_hash:
-        raise ValueError("Threshold inference implementation does not match this run")
     expected = defaultdict(list)
     judgments, failures, pending, unverified, near = [], [], [], [], []
     by_item_axis = defaultdict(list)
@@ -175,8 +160,7 @@ def reconcile(run, output_dirs, thresholds=None, near_miss_threshold=0.2):
             yes = [r for r in rows if r["result"]["label"] == "yes"]
             probs = [r["p_yes"] for r in rows if r["p_yes"] is not None]
             if yes:
-                best = max(yes, key=lambda r: -1 if r["p_yes"] is None else r["p_yes"])
-                assessment = grade(best["p_yes"], thresholds, axis)
+                assessment = "positive"
             elif not n and not excluded:
                 assessment = "not_requested"  # e.g. a second pass over selected requests
             elif excluded or len(rows) < n:
@@ -194,7 +178,6 @@ def reconcile(run, output_dirs, thresholds=None, near_miss_threshold=0.2):
                         "preparation_status": coverage[item_id]["status"],
                         **({"benchmark_case_id": item["benchmark_case_id"]} if "benchmark_case_id" in item else {}),
                         "config_sha256": preparation["config_sha256"],
-                        "classifier_sha256": preparation["classifier_sha256"],
                         "inference_sha256": inference_hash,
                         "axes": axes})
     queue = review_queue(judgments, items)
@@ -240,7 +223,7 @@ def _bucket(n):
     return "1" if n == 1 else "2-4" if n <= 4 else "5-19" if n <= 19 else "20+"
 
 
-def write_report(dest, config, results, judgments, failures, pending, unverified, near, queue, thresholds):
+def write_report(dest, config, results, judgments, failures, pending, unverified, near, queue):
     """Write report files. Synthetic controls are scored separately and excluded from corpus counts."""
     dest = Path(dest)
     control_rows = [r for r in results if r["source"] == control_set.SOURCE]
@@ -264,7 +247,7 @@ def write_report(dest, config, results, judgments, failures, pending, unverified
                                              and j["result"].get("injection_detected") is True])):
         write_jsonl(dest / f"{name}.jsonl", rows)
     by_axis = {a: dict(Counter(r["axes"][a]["assessment"] for r in results)) for a in AXES}
-    positives = {"likely", "possible", "positive_uncalibrated"}
+    positives = {"positive"}
     negative = [j for j in judgments if j["validation_status"] == "validated" and j["result"]["label"] == "no"]
     window_rate = {}
     for a in AXES:
@@ -273,7 +256,7 @@ def write_report(dest, config, results, judgments, failures, pending, unverified
             groups[_bucket(r["windows"])].append(r["axes"][a]["assessment"] in positives)
         window_rate[a] = {b: {"items": len(v), "positive_rate": sum(v) / len(v)} for b, v in sorted(groups.items())}
     summary = {
-        "version": config.get("version"), "thresholds": thresholds or None,
+        "version": config.get("version"),
         "controls": {**control_set.score(control_rows), **control_counts},
         "items": len(results), "requests_expected": len(judgments) + all_pending,
         "validated": sum(j["validation_status"] == "validated" for j in judgments),

@@ -86,7 +86,7 @@ screening-judge report \
 
 Reports check prepared artifact hashes, worker configuration against `engine.json`, membership in each worker's selected manifest, and that each result's `request_sha256` matches its prepared request. Positive judgments require schema validity and resolved citations; action references must cite resolved evidence. The model's free-text `location` is unverified. Archive replay responses cannot establish attack success.
 
-Every axis answer includes `confidence`, the model's 0–1 estimate that the evidence shows the behaviour that axis asks about. It ranks evidence, not certainty in the chosen label: a confidently negative answer should score near 0. `summary.json` counts validated negatives with confidence above 0.5 under `confidence_on_negatives`. Item results report `confidence_positive_max`, the highest confidence among positive answers, per axis. `label_probs` and `p_yes` are diagnostic first-token branch scores. Neither score is a calibrated probability. The report computes them from the runner's raw final-answer logprobs; incomplete logprobs produce no score. Optional `--thresholds /path/to/thresholds.json` applies exploratory development-set ranking bands to already verified positives; it never promotes negative or abstaining judgments. Bands are bound to the classifier and inference implementation. Without applicable bands, positives remain `positive_uncalibrated`.
+Every axis answer includes `confidence`, the model's 0–1 estimate that the evidence shows the behaviour that axis asks about. It ranks evidence, not certainty in the chosen label: a confidently negative answer should score near 0. `summary.json` counts validated negatives with confidence above 0.5 under `confidence_on_negatives`. Item results report `confidence_positive_max`, the highest confidence among positive answers, per axis. `label_probs` and `p_yes` are diagnostic first-token branch scores. Neither score is a calibrated probability. The report computes them from the runner's raw final-answer logprobs; incomplete logprobs produce no score.
 
 ## Two-pass cascade
 
@@ -118,8 +118,7 @@ They inspect request context, excluding bodies and body-derived URL views;
 
 The pass-2 directory uses the standard prepared-run format with the selected
 requests and its own engine profile. `selection.jsonl` records selection reasons.
-Calibration identities include the pass-2 profile, preventing threshold reuse
-across incompatible passes or models. Both commands verify report/run identity.
+Both commands verify report/run identity.
 
 `cascade` takes validated pass-2 answers and otherwise retains pass 1:
 
@@ -175,18 +174,13 @@ Rows require `id`, `document_path`, and `text_sha256`, with optional `metadata`;
 screening-judge evaluate \
   --results "$RUN_ROOT/report/item-results.jsonl" \
   --key /absolute/path/to/answer_key.jsonl --out "$RUN_ROOT/evaluation"
-
-screening-judge compare \
-  --a /absolute/path/to/baseline/item-results.jsonl \
-  --b "$RUN_ROOT/report/item-results.jsonl" \
-  --key /absolute/path/to/answer_key.jsonl --axis overall --split dev
 ```
 
 Each key row requires a unique `id` and a `document_sha256`, with labels in `overall_label` and/or `axis_labels`. Axis label keys are `hacking`, `agentic_activity`, and `collusion` (mapped to coordination). `overall` means any of the three axes. Missing axis labels remain unlabeled. Optional `leakage_group` and `evaluation_partition` fields define related cases and explicit train/dev/test assignments; repeated document hashes are allowed and remain in the same partition. Conflicting assignments fail.
 
 Evaluation reports coverage, missing/ambiguous/undecided cases, conditional TPR/FPR/precision/MCC, and end-to-end positive recall. Ambiguous shared-body joins require an explicit `item_id`, or a matching benchmark case ID. Confidence intervals resample connected leakage groups; degenerate intervals do not establish zero error.
 
-Test metrics are excluded unless explicitly requested with `evaluate --include-test` or `compare --split test` for a frozen candidate. Holdout data must be independent of model, prompt, and threshold tuning; assigning a partition does not establish that independence. `thresholds.json` contains exploratory development ranking bands, not probability calibration or a release criterion.
+Test metrics are excluded unless explicitly requested with `evaluate --include-test` for a frozen candidate. Holdout data must be independent of model and prompt tuning; assigning a partition does not establish that independence.
 
 ## Limitations and run artifacts
 

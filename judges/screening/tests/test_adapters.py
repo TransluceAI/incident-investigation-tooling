@@ -1,5 +1,4 @@
 import base64
-import copy
 import gzip
 import json
 import tempfile
@@ -9,9 +8,8 @@ from pathlib import Path
 from unittest.mock import patch
 
 from screening_judge import decode, controls, shapes
-from screening_judge.common import iter_jsonl, write_jsonl, classifier_hash
+from screening_judge.common import iter_jsonl, write_jsonl
 from screening_judge.prepare import prepare
-from screening_judge.prompts import load_prompts, schemas
 from screening_judge.report import reconcile
 from fixtures import build
 from test_pipeline import config
@@ -91,13 +89,6 @@ class AdapterTests(unittest.TestCase):
                 prepare(data, root/'run', lambda chat: sum(len(m['content']) for m in chat)//3,
                         6000, config(), with_controls=False)
             self.assertEqual(reads['documents/index.jsonl'], 1)
-
-    def test_classifier_identity_ignores_nonce_but_not_policy(self):
-        a={**config(),'prompts':load_prompts(),'schemas':schemas(),'boundary_salt':'test'}
-        b=copy.deepcopy(a);b['boundary_salt']='another-run'
-        self.assertEqual(classifier_hash(a),classifier_hash(b))
-        b['prompts']['axes']['hacking']+=' changed'
-        self.assertNotEqual(classifier_hash(a),classifier_hash(b))
 
 
 class AdditionalIntegrityTests(unittest.TestCase):

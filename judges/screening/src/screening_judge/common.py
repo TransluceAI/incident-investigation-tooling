@@ -62,9 +62,3 @@ def iter_jsonl(path):
         for line in stream:
             if line.strip():
                 yield json.loads(line)
-
-
-def classifier_hash(config):
-    """Settings that affect classification, excluding run nonce/counting diagnostics."""
-    stable = {k: v for k, v in config.items() if k not in {"boundary_salt", "token_count_mode"}}
-    return sha256_text(json.dumps(stable, sort_keys=True, ensure_ascii=False))

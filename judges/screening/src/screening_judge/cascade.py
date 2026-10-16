@@ -92,11 +92,7 @@ def escalate(run, report, out, engine_template, borderline=(0.2, 0.8), audit_rat
     atomic_write_text(out / "engine.json", json.dumps(runner, ensure_ascii=False, indent=2) + "\n")
     counts = Counter(reason.split(":")[0] if reason.startswith("rule:") else reason
                      for uid in selected for reason in reasons[uid])
-    # Pass 2 judges with another profile (thinking, sampling, possibly another model),
-    # so thresholds fitted on pass 1 must not apply to it: its identity adds the profile.
-    classifier = sha256_text(json.dumps({"pass1_classifier_sha256": preparation["classifier_sha256"],
-                                         "engine": runner}, sort_keys=True, ensure_ascii=False))
-    summary = {**{k: preparation[k] for k in ("version", "config_sha256")}, "classifier_sha256": classifier,
+    summary = {**{k: preparation[k] for k in ("version", "config_sha256")},
                "pass": 2, "requests": len(selected), "pass1_requests": len(judgments),
                "selection": dict(counts), "borderline": [lo, hi], "audit_rate": audit_rate, "seed": seed,
                "parent": {"run": str(run.resolve()), "preparation_sha256": sha256_file(run / "preparation.json"),
