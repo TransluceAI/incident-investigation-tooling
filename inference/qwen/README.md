@@ -3,15 +3,18 @@
 Standalone offline inference for compatible Qwen models using vLLM and Slurm.
 Prepared JSONL shards become Slurm array tasks, with one model replica on one GPU
 per task. Each worker validates structured JSON answers and commits resumable
-output parts. Application prompts and JSON schemas are supplied in configuration;
-this tool has no dependency on a judge package or dataset.
+output parts. Application prompts and JSON schemas are supplied in configuration
+or in each request row; this tool has no dependency on a judge package or dataset.
+Applications write requests and read results ([format](REQUESTS.md)); they do not
+carry their own copy of the runner.
 
 ## Layout
 
 - `scripts/`: runtime installation, pinned model download, submission, Slurm worker,
   and inference runner.
 - `config/`: named model profiles with synthetic text-transport prompts/schemas.
-- `examples/`: a synthetic input for smoke checks.
+- `examples/`: synthetic text and request inputs for smoke checks.
+- `REQUESTS.md`: the request/result row format shared with applications.
 - `tests/`: CPU tests with simulated model and scheduler dependencies.
 - `requirements-gpu.txt`: package-version snapshot from the existing cluster setup.
 
@@ -72,7 +75,10 @@ immutable for the lifetime of a resumable run.
 Each input line must contain a unique string `unit_id`, nonnegative integer
 `chunk_idx`, string `text`, and `text_sha256` covering the exact UTF-8 text.
 The system prompt comes from config; text is wrapped in `<document>` tags in the
-user message. Prepare disjoint shards named `part-0.jsonl`, `part-1.jsonl`, etc.
+user message. Alternatively, each line can be a self-contained request with
+`custom_id` and a `body` holding its messages, optional JSON Schema and optional
+logprobs; see [REQUESTS.md](REQUESTS.md). One manifest uses one row format.
+Prepare disjoint shards named `part-0.jsonl`, `part-1.jsonl`, etc.
 Global uniqueness across shards is the caller's responsibility.
 
 Copy the resolved config and replace `system_prompt` and `schema` for your task.

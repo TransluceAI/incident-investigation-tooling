@@ -1,10 +1,15 @@
-"""Offline, resumable inference on prepared UTF-8 JSONL units. No corpus parsing."""
+"""Offline, resumable inference on prepared UTF-8 JSONL units. No corpus parsing.
+
+A manifest holds either text rows (config supplies the prompt and schema) or
+request rows (each carries its own messages, schema and logprob options).
+"""
 import argparse
 import contextlib
 from datetime import datetime, timezone
 import fcntl
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import signal
@@ -46,13 +51,74 @@ def write_json(path, value):
     atomic_write(path, json.dumps(value, ensure_ascii=False, indent=2) + '\n')
 
 
+ROLES = ('system', 'user', 'assistant')
+BODY_KEYS = {'messages', 'response_format', 'logprobs', 'top_logprobs'}
+
+
+def request_hash(body):
+    return digest(json.dumps(body, sort_keys=True, ensure_ascii=False, separators=(',', ':')).encode('utf-8'))
+
+
+def request_unit(row, idx):
+    """Normalize one request row: {"custom_id", "body": {"messages", ...}}.
+
+    The body follows the chat-completions batch shape. Sampling stays in config;
+    unknown body keys are rejected rather than silently ignored.
+    """
+    if set(row) - {'custom_id', 'body', 'method', 'url'}:
+        raise ValueError(f'Unknown request fields at row {idx}')
+    if row.get('method', 'POST') != 'POST' or row.get('url', '/v1/chat/completions') != '/v1/chat/completions':
+        raise ValueError(f'Only POST /v1/chat/completions requests are supported (row {idx})')
+    if not isinstance(row.get('custom_id'), str) or not row['custom_id']:
+        raise ValueError(f'Invalid custom_id at row {idx}')
+    body = row.get('body')
+    if not isinstance(body, dict) or set(body) - BODY_KEYS:
+        raise ValueError(f'Request body accepts {sorted(BODY_KEYS)} only: {row["custom_id"]}')
+    chat = body.get('messages')
+    if (not isinstance(chat, list) or not chat or any(
+            not isinstance(m, dict) or set(m) != {'role', 'content'} or m['role'] not in ROLES
+            or not isinstance(m['content'], str) for m in chat)):
+        raise ValueError(f'messages must be a nonempty list of {{role, content}} strings: {row["custom_id"]}')
+    response = body.get('response_format')
+    if response is not None:
+        spec = response.get('json_schema') if isinstance(response, dict) else None
+        if (not isinstance(response, dict) or set(response) != {'type', 'json_schema'}
+                or response['type'] != 'json_schema'
+                or not isinstance(spec, dict) or not isinstance(spec.get('schema'), dict)
+                or set(spec) - {'name', 'schema', 'strict'}):
+            raise ValueError(f'response_format must be {{"type": "json_schema", "json_schema": '
+                             f'{{"schema": ...}}}}: {row["custom_id"]}')
+    wants = body.get('logprobs', False)
+    top = body.get('top_logprobs')
+    if type(wants) is not bool or (top is not None and (type(top) is not int or not 0 <= top <= 20 or not wants)):
+        raise ValueError(f'logprobs must be true/false; top_logprobs (0-20) requires logprobs: {row["custom_id"]}')
+    return {'unit_id': row['custom_id'], 'custom_id': row['custom_id'], 'body': body,
+            'request_sha256': request_hash(body)}
+
+
+def fingerprint(row):
+    """Content hash that resume compares between input and committed rows."""
+    return row['request_sha256'] if 'custom_id' in row else row['text_sha256']
+
+
 def units(path, limit=None):
-    seen = set()
+    seen, mode = set(), None
     with open(path, encoding='utf-8') as stream:
         for idx, line in enumerate(stream):
             if limit is not None and idx >= limit:
                 break
             row = json.loads(line)
+            kind = 'request' if isinstance(row, dict) and 'custom_id' in row else 'text'
+            if mode not in (None, kind):
+                raise ValueError(f'Manifest mixes text and request rows at row {idx}')
+            mode = kind
+            if kind == 'request':
+                row = request_unit(row, idx)
+                if row['unit_id'] in seen:
+                    raise ValueError(f'Duplicate custom_id: {row["unit_id"]}')
+                seen.add(row['unit_id'])
+                yield row
+                continue
             if not isinstance(row.get('unit_id'), str) or not row['unit_id']:
                 raise ValueError(f'Invalid unit ID at row {idx}')
             if row['unit_id'] in seen:
@@ -82,8 +148,55 @@ def committed(directory, identity):
 
 
 def messages(row, config):
+    if 'body' in row:
+        return row['body']['messages']
     return [{'role': 'system', 'content': config['system_prompt']},
             {'role': 'user', 'content': '<document>\n' + row['text'] + '\n</document>'}]
+
+
+def row_schema(row, config):
+    """The request's own schema, else the configured one."""
+    response = (row or {}).get('body', {}).get('response_format')
+    if response is not None:
+        return response['json_schema']['schema']
+    if 'schema' not in config:
+        raise ValueError(f'No response_format and no config schema: {row["unit_id"]}')
+    return config['schema']
+
+
+def top_logprobs(row):
+    """Candidates per generated token requested by a row, or None."""
+    body = (row or {}).get('body', {})
+    return body.get('top_logprobs', 0) if body.get('logprobs') else None
+
+
+def final_logprobs(answer, start):
+    """Chat-completions style logprobs for the final answer tokens (after reasoning).
+
+    Each entry gives the sampled token and every candidate the engine returned
+    (top-k plus the sampled token). Missing or non-finite values become null;
+    nothing is inferred. Returns None when the engine gave no aligned logprobs.
+    """
+    tables = getattr(answer, 'logprobs', None)
+    ids = list(answer.token_ids)
+    if not tables or len(tables) != len(ids):
+        return None
+
+    def value(lp):
+        return lp if isinstance(lp, (int, float)) and math.isfinite(lp) else None
+
+    content = []
+    for token_id, table in zip(ids[start:], tables[start:]):
+        table = table or {}
+        chosen = table.get(token_id)
+        ranked = sorted(table.values(), key=lambda c: (getattr(c, 'rank', None) is None,
+                                                       getattr(c, 'rank', None) or 0,
+                                                       -(value(c.logprob) or -math.inf)))
+        content.append({'token': getattr(chosen, 'decoded_token', None),
+                        'logprob': value(chosen.logprob) if chosen is not None else None,
+                        'top_logprobs': [{'token': c.decoded_token, 'logprob': value(c.logprob)}
+                                         for c in ranked]})
+    return {'content': content}
 
 
 def thinking_enabled(config):
@@ -305,9 +418,11 @@ def batches(rows, tokenizer, config, skip):
     batch, count = [], 0
     for row in rows:
         if row['unit_id'] in skip:
-            if row['text_sha256'] != skip[row['unit_id']]['text_sha256']:
-                raise ValueError('Committed text hash does not match input')
+            if fingerprint(row) != fingerprint(skip[row['unit_id']]):
+                raise ValueError('Committed input hash does not match input')
             continue
+        if 'body' in row and config.get('citation_constraints'):
+            raise ValueError('citation_constraints apply to text rows; narrow citations in the request schema')
         chat = messages(row, config)
         ids = tokenizer.apply_chat_template(chat, tokenize=True, return_dict=False, add_generation_prompt=True,
                                             **config['chat_template_kwargs'])
@@ -375,7 +490,6 @@ def run(resources):
     enabled = thinking_enabled(config)
     resolved_engine = engine_options(config)
     controls = decoding_controls(config)
-    legacy = not controls['citations'] and controls['attempts'] == 1
     identity_data = {'config': config, 'manifest_hash': file_hash(args.fixtures),
                      'runner_hash': file_hash(__file__), 'max_records': args.max_records}
     identity = digest(json.dumps(identity_data, sort_keys=True).encode())
@@ -383,16 +497,30 @@ def run(resources):
     directory.mkdir(parents=True, exist_ok=True)
     from transformers import AutoTokenizer
     from jsonschema import Draft202012Validator
-    validator = Draft202012Validator(config['schema'])
-    Draft202012Validator.check_schema(config['schema'])
+    validators = {}
+
+    def validator_for(row):
+        # Requests may share or differ in schema; compile each distinct one once.
+        schema = row_schema(row, config)
+        key = json.dumps(schema, sort_keys=True)
+        if key not in validators:
+            Draft202012Validator.check_schema(schema)
+            validators[key] = Draft202012Validator(schema)
+        return validators[key]
+
+    if 'schema' in config:
+        validator_for(None)
     tokenizer = AutoTokenizer.from_pretrained(config['model'], local_files_only=True,
                                               trust_remote_code=False)
     # Validate every selected unit before instantiating a GPU model.
     check_reasoning_end(config, tokenizer)
-    input_info = {r['unit_id']: r['text_sha256'] for r in units(args.fixtures, args.max_records)}
+    input_info = {r['unit_id']: fingerprint(r) for r in units(args.fixtures, args.max_records)}
+    per_unit = controls['citations'] or any('body' in r for r in units(args.fixtures, 1))
+    legacy = not per_unit and controls['attempts'] == 1
     for batch in batches(units(args.fixtures, args.max_records), tokenizer, config, {}):
-        if controls['citations']:
-            for row, _, _ in batch:
+        for row, _, _ in batch:
+            validator_for(row)
+            if controls['citations']:
                 Draft202012Validator.check_schema(citation_schema(config['schema'], row))
     if args.validate_only:
         print(json.dumps({'event': 'validated', 'units': len(input_info), 'identity': identity}), flush=True)
@@ -411,7 +539,7 @@ def run(resources):
     if not set(done).issubset(input_info):
         raise ValueError('Committed IDs outside selected manifest')
     for key, row in done.items():
-        if row['text_sha256'] != input_info[key]:
+        if fingerprint(row) != input_info[key]:
             raise ValueError('Committed/input hash mismatch')
     stopping = False
 
@@ -455,10 +583,13 @@ def run(resources):
             # retries may produce the same answer; recovery is not guaranteed.
             if attempt > 1 and type(kwargs.get('seed')) is int:
                 kwargs['seed'] += attempt - 1
-            schema = citation_schema(config['schema'], row) if controls['citations'] else config['schema']
+            schema = citation_schema(config['schema'], row) if controls['citations'] else row_schema(row, config)
+            k = top_logprobs(row)
+            if k is not None:
+                kwargs['logprobs'] = k
             return SamplingParams(**kwargs, structured_outputs=StructuredOutputsParams(json=schema))
 
-        sampling = sampling_for(None, 1) if not controls['citations'] else None
+        sampling = sampling_for(None, 1) if not per_unit else None
         startup = {'utc': now(), 'load_seconds': time.monotonic()-started,
                    'enable_thinking': enabled, 'engine': resolved_engine,
                    'sampling': config['sampling'],
@@ -494,14 +625,19 @@ def run(resources):
                         raise RuntimeError('Expected exactly one model output per unit; batch not committed')
                     answer = output.outputs[0]
                     parsed, error, answer_fields = validate_answer(
-                        answer, output.prompt_token_ids, count, tokenizer, validator, enabled)
-                    result = {'run_identity': identity, 'unit_id': row['unit_id'],
-                              'text_sha256': row['text_sha256'], 'chunk_idx': row['chunk_idx'],
+                        answer, output.prompt_token_ids, count, tokenizer, validator_for(row), enabled)
+                    source = ({'custom_id': row['custom_id'], 'request_sha256': row['request_sha256']}
+                              if 'body' in row else
+                              {'text_sha256': row['text_sha256'], 'chunk_idx': row['chunk_idx']})
+                    result = {'run_identity': identity, 'unit_id': row['unit_id'], **source,
                               'status': 'failed' if error else 'success', 'result': parsed,
                               'error': error, 'raw_output': answer.text,
                               **answer_fields,
                               'input_tokens': count, 'output_tokens': len(answer.token_ids),
                               'finish_reason': answer.finish_reason, 'utc': now()}
+                    if top_logprobs(row) is not None:
+                        result['logprobs'] = (None if error else
+                                              final_logprobs(answer, answer_fields['reasoning_tokens'] or 0))
                     if controls['budget'] is not None:
                         # Natural reasoning cannot exceed the budget, so more tokens
                         # mean vLLM forced the end string.
