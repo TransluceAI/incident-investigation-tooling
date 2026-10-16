@@ -196,7 +196,7 @@ def item_bodies(item, corpus, gaps):
     return out
 
 
-def prepare(data_root, out, count, window_tokens, config_template, config_dir=None, with_controls=True, shards=1,
+def prepare(data_root, out, count, window_tokens, config_template, with_controls=True, shards=1,
             benchmark_manifest=None, label_logprobs=10, citation_constraints=True):
     if window_tokens <= 0 or type(shards) is not int or shards < 1:
         raise ValueError("window_tokens and shards must be positive")
@@ -208,7 +208,7 @@ def prepare(data_root, out, count, window_tokens, config_template, config_dir=No
     out = Path(out)
     out.mkdir(parents=True, exist_ok=False)
     corpus, gaps = Corpus(data_root), []
-    config = {**config_template, "version": VERSION, "prompts": load_prompts(config_dir) if config_dir else load_prompts(),
+    config = {**config_template, "version": VERSION, "prompts": load_prompts(),
               "schemas": schemas(), "boundary_salt": secrets.token_hex(16),
               "window_tokens": window_tokens, "label_logprobs": label_logprobs,
               "citation_constraints": citation_constraints,

@@ -37,16 +37,7 @@ def sources(root: Path):
 
 
 def iter_source_records(path: Path):
-    """Yield (line_no, record_or_None, error). JSON arrays/objects in .json files are supported."""
-    if path.suffix == ".json":
-        try:
-            value = json.loads(path.read_text(encoding="utf-8"))
-        except Exception as exc:
-            yield 1, None, f"{type(exc).__name__}: {exc}"
-            return
-        for i, rec in enumerate(value if isinstance(value, list) else [value], 1):
-            yield i, rec, None
-        return
+    """Yield (line_no, record_or_None, error) for one JSONL file."""
     with open(path, encoding="utf-8") as stream:
         for i, line in enumerate(stream, 1):
             if not line.strip():
