@@ -585,15 +585,16 @@ def run(resources):
         from vllm import LLM, SamplingParams
         from vllm.sampling_params import StructuredOutputsParams
         import torch
+        cuda_count = torch.cuda.device_count()
+        if cuda_count != 1:
+            raise RuntimeError('Expected exactly one Slurm-allocated CUDA device')
         print(json.dumps({'event': 'loading', 'utc': now(), 'worker': args.worker_id,
                           'job_id': os.environ.get('SLURM_JOB_ID'),
                           'cuda_visible_devices': os.environ.get('CUDA_VISIBLE_DEVICES'),
-                          'cuda_count': torch.cuda.device_count(),
+                          'cuda_count': cuda_count,
                           'gpu': torch.cuda.get_device_name(0),
                           'torch': torch.__version__, 'cuda_runtime': torch.version.cuda,
                           'identity': identity}), flush=True)
-        if torch.cuda.device_count() != 1:
-            raise RuntimeError('Expected exactly one Slurm-allocated CUDA device')
         engine_kwargs = dict(resolved_engine)
         if 'reasoning_config' in engine_kwargs:
             from vllm.config.reasoning import ReasoningConfig

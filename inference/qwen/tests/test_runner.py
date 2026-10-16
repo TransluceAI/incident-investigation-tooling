@@ -430,6 +430,11 @@ class DecodingControlTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'leave room for final JSON'):
             r.check_reasoning_end(self.cfg, tokenizer)
 
+    def test_gpu_allocation_is_checked_before_device_lookup(self):
+        for count in (0, 2):
+            with self.subTest(count=count):
+                self._run_retry_case(gpu_count=count)
+
     def test_full_runner_with_disabled_statistics(self):
         for explicit in (True, False):
             with self.subTest(explicit=explicit):
@@ -446,7 +451,7 @@ class DecodingControlTests(unittest.TestCase):
             with self.subTest(mode=mode):
                 self._run_retry_case(mode)
 
-    def _run_retry_case(self, stop_mode=None):
+    def _run_retry_case(self, stop_mode=None, gpu_count=1):
         tokenizer = EndTokenizer()
         calls, loads = [], []
         clock, handlers = [0], {}
@@ -478,9 +483,13 @@ class DecodingControlTests(unittest.TestCase):
                              answer(reasoning='x' * 14336 + 'Answer now.\n') if not first else answer()])
                     for i, chat in enumerate(chats)]
 
+        def gpu_name(index):
+            self.assertEqual(gpu_count, 1, 'Device lookup ran before allocation validation')
+            return 'fake'
+
         modules = {
             'transformers': SimpleNamespace(AutoTokenizer=SimpleNamespace(from_pretrained=lambda *a, **k: tokenizer)),
-            'torch': SimpleNamespace(cuda=SimpleNamespace(device_count=lambda: 1, get_device_name=lambda i: 'fake'),
+            'torch': SimpleNamespace(cuda=SimpleNamespace(device_count=lambda: gpu_count, get_device_name=gpu_name),
                                      __version__='fake', version=SimpleNamespace(cuda='fake')),
             'vllm': SimpleNamespace(LLM=FakeLLM, SamplingParams=lambda **k: k),
             'vllm.config': SimpleNamespace(),
@@ -513,6 +522,11 @@ class DecodingControlTests(unittest.TestCase):
             elif stop_mode == 'no_load':
                 argv += ['--stop-at', '1970-01-01T00:00:03+00:00', '--drain-seconds', '4']
             with patch.object(sys, 'argv', argv):
+                if gpu_count != 1:
+                    with self.assertRaisesRegex(RuntimeError, 'exactly one Slurm-allocated'):
+                        r.main()
+                    self.assertEqual(loads, [])
+                    return
                 if stop_mode:
                     with self.assertRaises(SystemExit) as stopped:
                         r.main()
