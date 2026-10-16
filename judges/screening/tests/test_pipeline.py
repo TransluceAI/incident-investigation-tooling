@@ -222,6 +222,29 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual([o['observation_id'] for o in items['urlquery.net']['observations']], ['redirect-1'])
         self.assertFalse(any(g.get('source') == 'urlquery.net' for g in iter_jsonl(self.run/'gaps.jsonl')))
 
+    def test_source_adapters_receive_only_their_own_kinds(self):
+        from unittest.mock import patch
+        from screening_judge import prepare as prep
+        received = []
+
+        def join(source, recs, corpus, items, gaps):
+            received.extend((source, r['observation_id']) for r in recs)
+            item = prep._new_item('joined-' + source, source, 'text')
+            for r in recs:
+                prep._observe(item, r)
+            items[item['item_id']] = item
+
+        write_jsonl(self.data/'resources/other/records.jsonl', [self.record('elsewhere', 'x', kind='event_part')])
+        adapters = {**prep.ADAPTERS, 'sample': prep.Adapter(frozenset({'event_part'}), join)}
+        with patch.object(prep, 'ADAPTERS', adapters):
+            self.prepare([self.record('a', 'part one', kind='event_part'), self.record('b', 'part two', kind='event_part'),
+                          self.record('c', 'standalone')])
+        self.assertEqual(received, [('sample', 'a'), ('sample', 'b')])  # same kind in 'other' stays generic
+        items = list(iter_jsonl(self.run/'items.jsonl'))
+        joined = next(i for i in items if i['item_id'] == 'joined-sample')
+        self.assertEqual([o['observation_id'] for o in joined['observations']], ['a', 'b'])
+        self.assertEqual({i['source'] for i in items if i['item_id'] != 'joined-sample'}, {'sample', 'other'})
+
     def test_empty_corpus_rejected(self):
         with self.assertRaisesRegex(ValueError, 'No .*records|empty'):
             self.prepare([])
