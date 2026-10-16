@@ -9,7 +9,7 @@ splits one event across several records registers an adapter in ADAPTERS that
 joins them; Arquivo is the only one.
 
 requests.jsonl holds one self-contained request per (window, axis) for the
-shared inference runner (inference/qwen, REQUESTS.md): finished messages, the
+shared inference runner (inference/qwen/README.md#request-rows): finished messages, the
 axis schema and logprob options. engine.json is the runner profile for the run.
 """
 import contextlib

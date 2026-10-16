@@ -4,7 +4,7 @@ An LLM judge for screening preserved public-web evidence across datasets. It ind
 
 The judge supports captures and redirects, scanner reports, wiki content, messages, and general text. It preserves request context, decodes embedded URLs and programs as inert text, and splits long items into overlapping windows that each repeat the item's context and provenance (or, when provenance is too long, its leading lines). Numbered source chunks let the model cite locations without copying escaped text. It never executes evidence or follows evidence URLs.
 
-This is exploratory evidence triage. Labels require human review, and source-location validation does not establish classification accuracy or a successful compromise. The local framework is tested; model accuracy and calibration have not yet been measured.
+This is exploratory evidence triage. Labels require human review, and source-location validation does not establish classification accuracy or a successful compromise.
 
 ## Code
 
@@ -16,9 +16,7 @@ src/screening_judge/    Adapters, schemas, preparation, requests, label scores, 
 tests/                  CPU regression tests and synthetic corpus fixtures
 ```
 
-The package is `screening-judge`, its Python module is `screening_judge`, and its installed CLI is `screening-judge`. The wheel includes the rubrics.
-
-The judge has no GPU code. Inference uses the repository's shared runner, [`inference/qwen`](../../inference/qwen/): `prepare` writes one self-contained request per (window, axis) in its [request format](../../inference/qwen/REQUESTS.md), the runner returns one result per request, and `report` validates those results and computes label scores. Engine, sampling, thinking, and decoding settings come from the runner's model profiles.
+Inference uses [`inference/qwen`](../../inference/qwen/README.md). `prepare` writes one [request](../../inference/qwen/README.md#request-rows) per (window, axis); `report` validates the results and computes label scores. Model profiles control engine, sampling, thinking, and decoding settings.
 
 ## Install
 
@@ -32,13 +30,13 @@ python -m pip install -e '.[prepare]'   # Also prepare inputs with Transformers
 
 Pass a resolved runner profile as `--engine`, for example `inference/qwen/.runtime/config/qwen3.8-27b-fp8.json` after its model download. Its `model` must be the local model path, because preparation counts tokens with that tokenizer. The `model_revision` field records the intended snapshot; it does not verify the weights at that path. The profile's transport `system_prompt` and `schema` are not used: each request carries the judge's own prompts and per-axis schema. Preparation writes the profile's engine and sampling settings to `engine.json` for the runner.
 
-The baseline profile disables thinking; the `thinking` and `thinking.controls` profiles enable it. Settings need comparative evaluation before choosing a default.
+The baseline profile disables thinking; the `thinking` and `thinking.controls` profiles enable it.
 
-Each request's schema is narrowed to the window's citable segments and chunk numbers, so constrained decoding cannot emit an unknown citation; `--no-citation-constraints` sends the plain axis schema instead. Each prompt also describes the response fields one by one after the axis question, as vLLM's structured-output guide recommends, generated from the same schema. `--label-logprobs K` (default 10, 0 disables) sets the logprob candidates requested for label scores.
+Each request's schema is narrowed to the window's citable segments and chunk numbers, so constrained decoding cannot emit an unknown citation; `--no-citation-constraints` sends the plain axis schema instead. Prompts include field descriptions generated from the response schema. `--label-logprobs K` (default 10, 0 disables) sets the logprob candidates requested for label scores.
 
 ## Prepare and run
 
-Run `screening-judge` from this tool's directory and the runner commands from `inference/qwen`. `DATA_ROOT` must contain an export matching [the input contract](#input-format); the tool does not collect or crawl sources. Keep run artifacts outside the repository.
+Run the runner commands below from `inference/qwen`. `DATA_ROOT` must contain an export matching [the input contract](#input-format). Keep run artifacts outside the repository.
 
 ```sh
 export DATA_ROOT=/absolute/path/to/exported-corpus
@@ -64,7 +62,7 @@ export OUTPUT_DIR="$RUN_ROOT/inference/outputs"
 
 `--shards` controls the shard count. Shards are named `part-N.jsonl` for the launcher's `--shard-dir`; a window's three axis requests stay together and adjacent so they share the prefix cache. For one worker, prepare with `--shards 1` and submit `$PREPARED_DIR/requests.jsonl` with `--manifest`. Synthetic controls are included by default and stay separate from corpus item counts.
 
-Use a fresh preparation directory for each experiment. See the runner README for resume, deadlines, and decoding controls. The runner counts prompt tokens and rejects oversized requests rather than truncating them. Unclosed reasoning blocks, length-limited answers and schema-invalid answers are failures.
+Use a fresh preparation directory for each run. Oversized requests are rejected before inference. See the runner README for [resume](../../inference/qwen/README.md#resume) and [decoding controls](../../inference/qwen/README.md#reasoning-and-decoding-controls).
 
 For CPU-only preparation without a tokenizer, add `--estimate-tokens 4` to the preparation command. This is a layout smoke test with estimated token counts, not validation of model compatibility or context limits.
 
@@ -81,18 +79,18 @@ screening-judge report \
 - `summary.json`: item/request counts, validation status, control results, and assessments by axis and shape.
 - `item-results.jsonl`: per-item assessments and completion status for all three axes.
 - `judgments.jsonl`: committed judgments, including validation failures and resolved evidence for validated results.
-- `review-queue.jsonl`: every request needing a human: verified positives on any axis, unverified positives, abstentions, and failures, each with its `queue_reason`. It is sorted by descending `confidence` (missing scores last), then by `p_yes`. An item can contribute several rows.
+- `review-queue.jsonl`: every request needing a human: verified positives on any axis, unverified positives, abstentions, and failures, each with its `queue_reason`, in that order. Within each reason it is sorted by descending `confidence` (missing scores last), then by `p_yes`. An item can contribute several rows.
 - `failures.jsonl`, `pending.jsonl`, `unverified-candidates.jsonl`: failures, unfinished requests, and unresolved positive claims kept separate from negatives.
 - `near-misses.jsonl`, `injection-review.jsonl`: additional candidates for review.
-- `control-results.jsonl`: synthetic controls, excluded from corpus item counts. Request totals include controls.
+- `control-results.jsonl`: synthetic controls, excluded from corpus item counts. Request totals include controls. In a pass-2 report, control axes that were not selected are untested: they count in `controls.not_requested`, not in `passed` or `total`.
 
 Reports check prepared artifact hashes, worker configuration against `engine.json`, membership in each worker's selected manifest, and that each result's `request_sha256` matches its prepared request. Positive judgments require schema validity and resolved citations; action references must cite resolved evidence. The model's free-text `location` is unverified. Archive replay responses cannot establish attack success.
 
-Every axis answer includes `confidence`, the model's 0–1 estimate that the evidence shows the behaviour that axis asks about, as in the Arquivo judge's hacking confidence. It ranks evidence, not certainty in the chosen label: a confidently negative answer should score near 0. Item results report `confidence_max` per axis. `label_probs` and `p_yes` are diagnostic first-token branch scores. Neither score is a calibrated probability. The report computes them from the runner's raw final-answer logprobs; incomplete logprobs produce no score. Optional `--thresholds /path/to/thresholds.json` applies exploratory development-set ranking bands to already verified positives; it never promotes negative or abstaining judgments. Bands are bound to the classifier and inference implementation. Without applicable bands, positives remain `positive_uncalibrated`.
+Every axis answer includes `confidence`, the model's 0–1 estimate that the evidence shows the behaviour that axis asks about. It ranks evidence, not certainty in the chosen label: a confidently negative answer should score near 0. `summary.json` counts validated negatives with confidence above 0.5 under `confidence_on_negatives`. Item results report `confidence_positive_max`, the highest confidence among positive answers, per axis. `label_probs` and `p_yes` are diagnostic first-token branch scores. Neither score is a calibrated probability. The report computes them from the runner's raw final-answer logprobs; incomplete logprobs produce no score. Optional `--thresholds /path/to/thresholds.json` applies exploratory development-set ranking bands to already verified positives; it never promotes negative or abstaining judgments. Bands are bound to the classifier and inference implementation. Without applicable bands, positives remain `positive_uncalibrated`.
 
 ## Two-pass cascade
 
-Run every request once with reasoning off, then re-judge only the requests that matter with reasoning on:
+The cascade runs all requests with reasoning off and selected requests with reasoning on:
 
 ```sh
 screening-judge escalate \
@@ -106,9 +104,39 @@ screening-judge cascade \
   --pass2-report "$RUN_ROOT/pass2-report" --out "$RUN_ROOT/cascade"
 ```
 
-`escalate` selects pass-1 positives on any axis, unverified positives, abstentions, failures, negatives with P(yes) in the `--borderline` band (default 0.2–0.8), every axis of a window that a pass-0 rule flags, and a seeded random `--audit-rate` sample of the remaining negatives. Pass-0 rules (`rules.py`) are cheap triggers for patterns pass 1 under-flagged: non-default backend ports, request code overriding the Host header or TLS server name, `dav/versions` paths, and a CAPTCHA endpoint with an OCR API in the same URL or program. A full-corpus scan found every true positive in request or CDX URLs and their decoded views, and the noise in bodies, so the rules read only request context: segments that are neither a body nor decoded from URLs found in one (except the precise `dav/versions`). They are not yet measured against labelled data. The pass-2 directory is an ordinary prepared run over that subset of the same requests with the pass-2 runner profile, and `selection.jsonl` records each request's reasons. Its `classifier_sha256` combines pass 1's with the pass-2 profile, so thresholds fitted on one pass or model are refused for another. Escalation refuses a pass 1 with pending requests unless `--allow-pending` is given.
+`escalate` selects:
 
-`cascade` uses the pass-2 answer wherever pass 2 validated one and otherwise keeps pass 1. It writes `final-judgments.jsonl`, `review-queue.jsonl`, and `demoted.jsonl`: pass-1 positives that pass 2 no longer supports, kept visible at low priority until calibration shows reasoning does not lose real attacks. Pass-2 answers that fail validation leave the pass-1 classification in place but still enter the review queue, so an uncited pass-2 yes is not lost. Synthetic controls go to `control-judgments.jsonl` and stay out of the queues and counts. `summary.json` counts demotions, promotions and pass-2 failures, and how many audited pass-1 negatives pass 2 validated and answered yes; these are observed flips, not an estimate of total misses. Each report's judgments carry the hash of their prepared run (`preparation_sha256`, which covers the requests and runner profile), and `escalate`/`cascade` refuse reports from any other run. Shards never outnumber windows, and an escalation that selects nothing writes no shards. Cost relative to reasoning on everything, and whether the cascade matches its recall, still need measuring on labelled data.
+- Positives, unverified positives, abstentions, and failures on any axis.
+- Negatives with P(yes) in the `--borderline` band (default 0.2–0.8).
+- Every axis of windows matching a pass-0 rule.
+- A seeded random `--audit-rate` sample of remaining negatives.
+
+Pass-0 rules match non-default backend ports, Host-header or TLS-server-name
+overrides, `dav/versions` paths, and CAPTCHA/OCR chains in one URL or program.
+They inspect request context, excluding bodies and body-derived URL views;
+`dav/versions` is matched everywhere. A rule hit triggers escalation, not a label.
+
+The pass-2 directory uses the standard prepared-run format with the selected
+requests and its own engine profile. `selection.jsonl` records selection reasons.
+Calibration identities include the pass-2 profile, preventing threshold reuse
+across incompatible passes or models. Both commands verify report/run identity.
+
+`cascade` takes validated pass-2 answers and otherwise retains pass 1:
+
+| Output | Contents |
+| --- | --- |
+| `final-judgments.jsonl` | Merged corpus judgments |
+| `review-queue.jsonl` | Cases needing review, including failed or unverified pass-2 answers |
+| `demoted.jsonl` | Pass-1 positives that pass 2 no longer supports |
+| `control-judgments.jsonl` | Synthetic controls, separate from corpus judgments and queues |
+| `pass2-pending.jsonl` | Unfinished selected requests when `--allow-pending` is used |
+| `summary.json` | Promotions, demotions, failures, and observed positive flips in validated audits |
+
+Both commands reject pending requests in their input pass unless `--allow-pending`
+is set. Pending pass-2 requests retain their pass-1 answer and are marked
+`pass2_pending`. Audit flips are observations, not estimates of total misses or
+recall. Shards never outnumber selected windows; an empty selection needs no
+inference run and writes no shards.
 
 ## Tests
 
@@ -116,11 +144,11 @@ screening-judge cascade \
 PYTHONPATH=src python -m unittest discover -s tests -v
 ```
 
-The suite uses synthetic data and simulated runner outputs. It covers evidence preservation, provenance in every window, request contents, citation narrowing and resolution, label and confidence scores, the review queue, the two-pass cascade and pass-0 rules, worker assignment, failure handling, benchmark isolation, and evaluation joins. It requires no model, GPU, or network access. `test_shared_runner.py` runs prepared requests through the shared runner with a simulated engine; it skips when `inference/qwen` is absent, and `QWEN_RUNNER=/path/to/inference_runner.py` selects another checkout.
+Tests use synthetic data and simulated runner outputs; no model, GPU, or network access is required. `test_shared_runner.py` runs prepared requests through the shared runner with a simulated engine; it skips when `inference/qwen` is absent, and `QWEN_RUNNER=/path/to/inference_runner.py` selects an alternative runner path.
 
 ## Input format
 
-The export root contains `resources/*/records.jsonl` or recursive `resources/**/DIRECT_RECORDS.jsonl`, one observation per line. Each observation needs a string `observation_id` and `kind`; when `observation_id` is absent, a string `id` is used, as in `DIRECT_RECORDS.jsonl` exports. Each self-contained record needs no source-specific code. A source whose export splits one event across several records registers a join adapter in `prepare.ADAPTERS`, keyed by source name. The only one is `arquivo.pt`, whose CDX index rows, capture bodies and replay redirects are joined into one event per original URL and capture time; the same kinds from any other source are ordinary items. Stored text is referenced by `document_path` relative to the export root, with its UTF-8 SHA-256 in `text_sha256`. Records may also carry source, timestamp, and other provenance metadata.
+The export root contains `resources/*/records.jsonl` or recursive `resources/**/DIRECT_RECORDS.jsonl`, one observation per line. Each observation needs a string `observation_id` and `kind`; when `observation_id` is absent, a string `id` is used, as in `DIRECT_RECORDS.jsonl` exports. Multi-record events use source-specific join adapters in `prepare.ADAPTERS`. The `arquivo.pt` adapter joins CDX rows, capture bodies, and replay redirects by original URL and capture time. Other sources use individual records. Stored text is referenced by `document_path` relative to the export root, with its UTF-8 SHA-256 in `text_sha256`. Records may also carry source, timestamp, and other provenance metadata.
 
 Adapters map recognized kinds to capture, scanner, wiki, message, or text guidance; unknown kinds retain their text. Adding a dataset may require adapting its record format or kind mapping in `records.py` and `shapes.py`. Scanner views preserve nonempty scalar fields with JSON pointers. Captures with different request URLs remain separate even when their bodies match; other items merge only when source, shape, body hash, and evidence metadata match.
 
@@ -154,12 +182,10 @@ Each key row requires a unique `id` and a `document_sha256`, with labels in `ove
 
 Evaluation reports coverage, missing/ambiguous/undecided cases, conditional TPR/FPR/precision/MCC, and end-to-end positive recall. Ambiguous shared-body joins require an explicit `item_id`, or a matching benchmark case ID. Confidence intervals resample connected leakage groups; degenerate intervals do not establish zero error.
 
-Test metrics are excluded unless explicitly requested with `evaluate --include-test` or `compare --split test` for a frozen candidate. The existing 600-case benchmark was described as a development set: reserving a partition now does not establish historical independence. `thresholds.json` contains exploratory development ranking bands, not probability calibration or a release criterion.
+Test metrics are excluded unless explicitly requested with `evaluate --include-test` or `compare --split test` for a frozen candidate. Holdout data must be independent of model, prompt, and threshold tuning; assigning a partition does not establish that independence. `thresholds.json` contains exploratory development ranking bands, not probability calibration or a release criterion.
 
-## Recorded results
+## Limitations and run artifacts
 
-Local verification on 2026-10-16: **68 CPU tests pass**, including the shared-runner contract test against the `inference/qwen` runner from the separate inference branch; without that runner the contract test is skipped. Earlier, the renamed package built successfully as a wheel; its bundled policies and CLI entry point were checked from an extracted installation outside the checkout.
-
-No actual-model accuracy or calibration results are recorded for this judge yet. GPU compatibility, injection resistance, repeatability, and full-corpus memory/throughput remain unmeasured. Windows preserve text but can separate related context; cross-document reasoning is not implemented. Arquivo experiment results do not establish this judge's performance.
+Windows preserve text but can separate related context; cross-document reasoning is not implemented.
 
 For a model run, record the code revision, model snapshot, runtime versions, dataset identity, configuration, completed/failed/pending counts, control outcomes, and token/runtime totals alongside links to external artifacts. Accuracy claims additionally need the labeling method, split provenance, coverage, and per-axis metrics. Corpus files, weights, raw outputs, and reports belong outside this repository.
