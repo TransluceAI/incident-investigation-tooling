@@ -43,6 +43,8 @@ if [[ -n "$stop_at" ]]; then
   command+=(--stop-at "$stop_at")
   remaining=$("$python" -I -c 'import sys,time; from datetime import datetime; print(int(datetime.fromisoformat(sys.argv[1].replace("Z","+00:00")).timestamp()-time.time()))' "$stop_at")
   test "$remaining" -gt 0
+  # The runner drains before this hard cutoff. TERM asks srun to terminate
+  # the step, including engine children; kill-after only bounds srun cleanup.
   exec timeout --signal=TERM --kill-after=60s "${remaining}s" "${command[@]}"
 fi
 exec "${command[@]}"

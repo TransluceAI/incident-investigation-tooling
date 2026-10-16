@@ -217,9 +217,10 @@ batch: invalid JSON, schema violations, length or repetition stops, and reasonin
 that never closed. Engine, template and reasoning-boundary errors are not retried.
 An explicit sampling seed increments on retry, and optional `retry.temperatures`
 (one value per retry) sets the temperature for each retry; greedy retries may
-repeat the same answer. Resume never retries committed failures. A stop signal
-or elapsed deadline prevents another retry and commits the attempt already completed; an in-flight generation can
-still be terminated by Slurm before the batch is committed.
+repeat the same answer. Resume never retries committed failures. The drain cutoff
+or a SIGTERM/SIGINT sent directly to the runner prevents another batch or retry
+and lets the current generation finish before committing. Slurm cancellation
+and the hard deadline can terminate the engine too, losing the uncommitted batch.
 
 The profile key `citation_constraints` is rejected; supply constraints in the
 request schema.
