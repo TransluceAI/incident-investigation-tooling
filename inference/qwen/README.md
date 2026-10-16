@@ -58,8 +58,6 @@ directory for upgrades. Keep its absolute path stable. The tracked profile's
 `model` is a Hugging Face repository ID; the downloader writes an absolute local snapshot path
 into `.runtime/config/<profile-name>.json`. Submit the resolved config, not the
 tracked template. Cache directories and their symlink targets must remain intact.
-The model metadata manifest records metadata hashes and weight sizes, not full
-weight checksums.
 
 To use a separate runtime directory, pass it as the installation script's first
 argument and as `download_model.py --runtime-dir`. Supply both `--python` and
@@ -152,9 +150,8 @@ Each line is a self-contained chat request:
   config's `schema` applies. Validators use a bounded cache of 4,096 schemas.
 - `body.logprobs` / `body.top_logprobs`: optional; `top_logprobs` (0–20) requires
   `logprobs: true`.
-- Optional `method: "POST"` and `url: "/v1/chat/completions"` are accepted.
-  Other keys, including sampling settings, are rejected: sampling, thinking and decoding controls come from the
-  config profile so that one run uses one setting.
+- Other keys, including sampling settings, are rejected: sampling, thinking and
+  decoding controls come from the config profile so that one run uses one setting.
 
 The runner hashes each body: `request_sha256` is the SHA-256 of the UTF-8 JSON
 with sorted keys, `(',', ':')` separators and non-ASCII characters unescaped
@@ -228,9 +225,6 @@ and the hard deadline can terminate the engine too. Engine aborts and errors
 leave the entire current batch uncommitted, including when they occur during a
 retry. Resume regenerates that batch and skips earlier committed parts.
 
-The profile key `citation_constraints` is rejected; supply constraints in the
-request schema.
-
 ## Resume
 
 After the previous job exits:
@@ -240,8 +234,9 @@ After the previous job exits:
   --run-dir "$PWD/runs/workload-v1" --gpus 4 --time 04:00:00
 ```
 
-Resume uses the saved code, config and Python path, verifies saved file/input
-hashes, and refuses to overlap a recorded active job. Committed parts are skipped;
+Resume uses the saved code, config and Python path, verifies the saved run-file
+hashes at submission (each task verifies its input shard at job start), and
+refuses to overlap a recorded active job. Committed parts are skipped;
 an interrupted uncommitted batch may be recomputed. Changed model, config, code,
 or input requires a new run directory. The launcher records the Python path,
 not a hash of the full runtime/model contents; those must not be modified in place.

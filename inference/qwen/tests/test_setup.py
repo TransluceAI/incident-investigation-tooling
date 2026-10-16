@@ -82,9 +82,26 @@ class SubmissionTests(unittest.TestCase):
         with self.assertRaises(SystemExit):
             self.invoke('--resume')
         (self.run / '.submission-pending').unlink()
-        self.input.write_text('changed\n')
+        (self.run / 'config.json').write_text('{"changed": true}\n')
         with self.assertRaises(SystemExit):
             self.invoke('--resume')
+        self.assertIn('Saved config or code changed', self.errors.getvalue())
+
+    def test_changed_inputs_are_rejected_at_job_start(self):
+        self.fresh()
+        self.input.write_text('changed\n')
+        self.invoke('--resume')  # submission checks run files only; each task hashes its shard
+        manifest = (self.run / 'inputs.txt').read_text().split()[0]
+        script = (self.run / 'run.sbatch').read_text()
+        check = script.split("<<'PYHASH'\n")[1].split('\nPYHASH\n')[0]
+        result = subprocess.run([sys.executable, '-I', '-', str(self.run), manifest],
+                                input=check, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn('changed after submission', result.stderr)
+        self.input.write_text((ROOT / 'examples/input.jsonl').read_text())
+        result = subprocess.run([sys.executable, '-I', '-', str(self.run), manifest],
+                                input=check, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_resume_reports_missing_saved_files(self):
         self.fresh()
@@ -162,10 +179,6 @@ class DownloadTests(unittest.TestCase):
                 resolved = json.loads(output.read_text())
                 self.assertEqual(resolved, {**config, 'model': str(snapshot)})
                 self.assertEqual(profile.read_bytes(), original)
-                manifest = json.loads((root / 'runtime/manifests' /
-                                       (profile.stem + '.model.json')).read_text())
-                self.assertEqual(manifest['revision'], config['model_revision'])
-                self.assertIn('config.json', manifest['metadata_hashes'])
 
     def test_another_model_profile_is_selected_by_config_and_requires_a_pin(self):
         with tempfile.TemporaryDirectory() as tmp:

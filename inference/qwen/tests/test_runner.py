@@ -24,8 +24,8 @@ class FakeTokenizer:
         ids = self.encode(chat[-1]['content'])
         return ids + ([1, 10] if kwargs.get('enable_thinking') else [])
 
-    def get_vocab(self):
-        return {'<think>': 1, '</think>': 2}
+    def convert_tokens_to_ids(self, tokens):
+        return [{'<think>': 1, '</think>': 2}.get(t) for t in tokens]
 
     def encode(self, text):
         return [ord(c) + 100 for c in text]
@@ -243,7 +243,7 @@ class ReasoningTests(unittest.TestCase):
         with patch.object(self.tokenizer, 'apply_chat_template', return_value=[1, 2]):
             with self.assertRaisesRegex(ValueError, 'open <think>'):
                 list(r.batches([row], self.tokenizer, self.cfg, {}))
-        with patch.object(self.tokenizer, 'get_vocab', return_value={}):
+        with patch.object(self.tokenizer, 'convert_tokens_to_ids', return_value=[None, None]):
             with self.assertRaisesRegex(ValueError, 'requires Qwen'):
                 list(r.batches([row], self.tokenizer, self.cfg, {}))
 
@@ -354,8 +354,6 @@ class DecodingControlTests(unittest.TestCase):
                             (('sampling', 'repetition_detection'), {'max_pattern_size': 8, 'min_count': 1}),
                             (('sampling', 'n'), 2),
                             (('sampling', 'n'), True),
-                            (('citation_constraints',), True),  # applications narrow citations
-                            (('citation_constraints',), False),
                             (('retry',), {'max_attempts': 0}),
                             (('retry',), {'temperatures': []}),
                             (('retry',), {'max_attempts': 2, 'temperatures': [0.2, 0.5]}),

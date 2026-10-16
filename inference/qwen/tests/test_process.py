@@ -51,6 +51,9 @@ def run_with_engine(root, argv):
                 stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
             children.append(self.child)
 
+        def get_metrics(self):
+            return []
+
         def chat(self, chats, **kwargs):
             self.child.stdin.write(json.dumps(chats) + '\n')
             self.child.stdin.flush()
@@ -154,9 +157,9 @@ class ProcessTests(unittest.TestCase):
             worker = root / 'outputs/worker-0'
             stopped = subprocess.run(argv, env=env, capture_output=True, text=True, timeout=10)
             self.assertEqual(stopped.returncode, 2, stopped.stdout + stopped.stderr)
-            progress = json.loads((worker / 'progress.json').read_text())
-            self.assertEqual(progress['batch_seconds'], 800)
-            self.assertEqual(progress['longest_batch_seconds'], 1100)
+            timings = [json.loads(line) for line in (worker / 'timings.jsonl').read_text().splitlines()]
+            self.assertEqual(timings[-1]['batch_seconds'], 800)
+            self.assertEqual(timings[-1]['longest_batch_seconds'], 1100)
             summary = json.loads((worker / 'summary.json').read_text())
             self.assertEqual((summary['committed'], summary['unfinished']), (4, 2))
             generated = (root / 'generated.jsonl').read_bytes()

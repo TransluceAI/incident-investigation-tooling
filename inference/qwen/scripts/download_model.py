@@ -1,6 +1,5 @@
 """Download a pinned model profile and write a config with a local snapshot path."""
 import argparse
-import hashlib
 import json
 from pathlib import Path
 import re
@@ -18,24 +17,12 @@ def prepare(profile, runtime):
     runtime = runtime.expanduser().absolute()
     snapshot = Path(snapshot_download(model_id, revision=revision,
                                      cache_dir=str(runtime / 'models'), max_workers=8))
-    weights = [{'name': path.name, 'bytes': path.stat().st_size}
-               for path in sorted(snapshot.glob('*.safetensors'))]
-    if not weights:
+    if not any(snapshot.glob('*.safetensors')):
         raise RuntimeError('No weights in downloaded snapshot')
-    metadata = {
-        'model_id': model_id, 'revision': revision, 'snapshot': str(snapshot),
-        'metadata_hashes': {
-            path.name: hashlib.sha256(path.read_bytes()).hexdigest()
-            for path in sorted(snapshot.iterdir())
-            if path.is_file() and path.suffix in {'.json', '.jinja'}},
-        'weights': weights,
-    }
     config['model'] = str(snapshot)
     config_path = runtime / 'config' / profile.name
-    manifest_path = runtime / 'manifests' / (profile.stem + '.model.json')
-    for path, value in [(config_path, config), (manifest_path, metadata)]:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(value, indent=2) + '\n')
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config_path.write_text(json.dumps(config, indent=2) + '\n')
     return config_path
 
 

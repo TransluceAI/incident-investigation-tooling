@@ -22,11 +22,8 @@ def digest(data):
 
 
 def file_hash(path):
-    h = hashlib.sha256()
     with open(path, 'rb') as stream:
-        for block in iter(lambda: stream.read(1024 * 1024), b''):
-            h.update(block)
-    return h.hexdigest()
+        return hashlib.file_digest(stream, 'sha256').hexdigest()
 
 
 def now():
@@ -66,10 +63,8 @@ def request_unit(row, idx):
     The body follows the chat-completions batch shape. Sampling stays in config;
     unknown body keys are rejected rather than silently ignored.
     """
-    if set(row) - {'custom_id', 'body', 'method', 'url'}:
+    if set(row) - {'custom_id', 'body'}:
         raise ValueError(f'Unknown request fields at row {idx}')
-    if row.get('method', 'POST') != 'POST' or row.get('url', '/v1/chat/completions') != '/v1/chat/completions':
-        raise ValueError(f'Only POST /v1/chat/completions requests are supported (row {idx})')
     if not isinstance(row.get('custom_id'), str) or not row['custom_id']:
         raise ValueError(f'Invalid custom_id at row {idx}')
     body = row.get('body')
@@ -278,8 +273,6 @@ def decoding_controls(config):
             raise ValueError('thinking_token_budget must be a positive integer below max_tokens')
         if 'reasoning_config' not in config['engine']:
             raise ValueError('thinking_token_budget requires engine.reasoning_config')
-    if 'citation_constraints' in config:
-        raise ValueError('citation_constraints moved to applications: write a narrowed schema into each request')
     retry = config.get('retry')
     if retry is not None and (not isinstance(retry, dict) or 'max_attempts' not in retry
                               or set(retry) - {'max_attempts', 'temperatures'}
@@ -313,11 +306,10 @@ def check_reasoning_end(config, tokenizer):
 
 
 def thinking_tokens(tokenizer):
-    vocab = tokenizer.get_vocab()
-    try:
-        start, end = vocab['<think>'], vocab['</think>']
-    except KeyError as exc:
-        raise ValueError('Thinking requires Qwen <think>/</think> tokens') from exc
+    start, end = tokenizer.convert_tokens_to_ids(['<think>', '</think>'])
+    unknown = getattr(tokenizer, 'unk_token_id', None)
+    if start is None or end is None or unknown in (start, end):
+        raise ValueError('Thinking requires Qwen <think>/</think> tokens')
     if start == end:
         raise ValueError('Reasoning boundary tokens must be distinct')
     return start, end
@@ -412,8 +404,6 @@ def batches(rows, tokenizer, config, skip):
     batch, count = [], 0
     for row in rows:
         if row['unit_id'] in skip:
-            if fingerprint(row) != skip[row['unit_id']]['fingerprint']:
-                raise ValueError('Committed input hash does not match input')
             continue
         chat = messages(row, config)
         ids = tokenizer.apply_chat_template(chat, tokenize=True, return_dict=False, add_generation_prompt=True,
@@ -465,7 +455,7 @@ def earlier_attempts(row):
 
 
 def metrics_snapshot(llm, enabled=True):
-    if not enabled or not hasattr(llm, 'get_metrics'):
+    if not enabled:
         return {'available': False, 'preemptions': None, 'metrics': []}
     metrics = []
     for metric in llm.get_metrics():
@@ -553,8 +543,10 @@ def run(resources):
         end_str = (config['engine'].get('reasoning_config') or {}).get('reasoning_end_str') or '</think>'
         end_ids = tokenizer.encode(end_str, add_special_tokens=False)
         start_id = thinking_tokens(tokenizer)[0]
-    input_info = {r['unit_id']: fingerprint(r) for r in units(args.fixtures, args.max_records)}
-    per_unit = any('body' in r for r in units(args.fixtures, 1))
+    input_info, per_unit = {}, False
+    for r in units(args.fixtures, args.max_records):
+        input_info[r['unit_id']] = fingerprint(r)
+        per_unit = 'body' in r  # units() guarantees one row kind per manifest
     legacy = not per_unit and controls['attempts'] == 1
     for batch in batches(units(args.fixtures, args.max_records), tokenizer, config, {}):
         for row, _, _ in batch:
@@ -578,9 +570,11 @@ def run(resources):
     for key, row in done.items():
         if row['fingerprint'] != input_info[key]:
             raise ValueError('Committed/input hash mismatch')
-    progress_path = directory / 'progress.json'
-    previous = json.loads(progress_path.read_text()) if progress_path.exists() else {}
-    longest_batch_seconds = previous.get('longest_batch_seconds', previous.get('batch_seconds', 0))
+    longest_batch_seconds = 0
+    with contextlib.suppress(FileNotFoundError):
+        for line in (directory / 'timings.jsonl').read_text().splitlines():
+            with contextlib.suppress(ValueError):  # a torn last line after a crash
+                longest_batch_seconds = max(longest_batch_seconds, json.loads(line)['batch_seconds'])
     drain_at = deadline - max(args.drain_seconds, 2 * longest_batch_seconds)
     stopping = False
 
@@ -746,7 +740,6 @@ def run(resources):
             longest_batch_seconds = max(longest_batch_seconds, progress['batch_seconds'])
             drain_at = deadline - max(args.drain_seconds, 2 * longest_batch_seconds)
             progress['longest_batch_seconds'] = longest_batch_seconds
-            write_json(progress_path, progress)
             with open(directory / 'timings.jsonl', 'a') as stream:
                 stream.write(json.dumps(progress)+'\n')
                 stream.flush()

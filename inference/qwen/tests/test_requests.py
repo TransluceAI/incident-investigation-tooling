@@ -46,9 +46,6 @@ class RequestRowTests(unittest.TestCase):
         self.assertEqual(r.messages(unit, {}), row['body']['messages'])
         self.assertEqual(r.row_schema(unit, {}), SCHEMA)
         self.assertEqual(r.top_logprobs(unit), 5)
-        # OpenAI batch lines may also carry method/url.
-        openai = {**request('b'), 'method': 'POST', 'url': '/v1/chat/completions'}
-        self.assertEqual(next(r.units(self.manifest([openai])))['custom_id'], 'b')
 
     def test_example_request_is_valid(self):
         example = Path(__file__).resolve().parents[1] / 'examples/requests.jsonl'
@@ -130,6 +127,9 @@ class RequestRowTests(unittest.TestCase):
         class FakeLLM:
             def __init__(self, **kwargs):
                 loads.append(kwargs)
+
+            def get_metrics(self):
+                return []
 
             def chat(self, chats, **kwargs):
                 calls.append((chats, kwargs['sampling_params']))

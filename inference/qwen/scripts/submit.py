@@ -22,11 +22,8 @@ def pinned_python(path):
 
 
 def sha(path):
-    h = hashlib.sha256()
     with open(path, 'rb') as source:
-        for block in iter(lambda: source.read(1024*1024), b''):
-            h.update(block)
-    return h.hexdigest()
+        return hashlib.file_digest(source, 'sha256').hexdigest()
 
 
 def main():
@@ -104,16 +101,6 @@ def main():
     if not args.resume and not config.is_file():
         p.error('Config file is missing')
     os.umask(0o022)
-    shared = Path('/data/qwen-inference/runs')
-    if run.is_relative_to(shared):
-        parts = run.relative_to(shared).parts
-        if len(parts) < 2 or parts[0] != user:
-            p.error('Use /data/qwen-inference/runs/<your username>/<run name>')
-        parent = shared/user
-        parent.mkdir(exist_ok=True, mode=0o755)
-        if parent.is_symlink() or parent.stat().st_uid != os.getuid():
-            p.error('Shared user directory has an unexpected owner')
-        parent.chmod(0o755)
     run.mkdir(parents=True, exist_ok=True, mode=0o755)
     run.chmod(0o755)
     with (run/'.submit.lock').open('a') as lock:
@@ -139,9 +126,11 @@ def main():
             hashes = {str(path): sha(path) for path in paths}
             hashes.update({str(run/name):sha(run/name) for name in saved})
             (run/'hashes.json').write_text(json.dumps(hashes,indent=2)+'\n')
-        hashes = json.loads((run/'hashes.json').read_text())
-        if any(sha(path) != expected for path,expected in hashes.items()):
-            p.error('Saved config, code or input changed; use a new run directory')
+        if args.resume:
+            # Each task re-verifies its own input shard at job start (run.sbatch).
+            hashes = json.loads((run/'hashes.json').read_text())
+            if any(sha(path) != expected for path, expected in hashes.items() if Path(path).parent == run):
+                p.error('Saved config or code changed; use a new run directory')
         command = ['sbatch','--parsable',f'--partition={args.partition}','--nodes=1','--ntasks=1',
                    '--gres=gpu:1','--cpus-per-task=8','--mem=64G',
                    f'--time={duration//3600:02}:{duration//60%60:02}:{duration%60:02}',
