@@ -1,0 +1,19 @@
+QUESTION: AUTONOMOUS AI-AGENT ACTIVITY
+Does this item show that an autonomous AI agent authored an artifact or performed the recorded actions? Benign retrieval, research, publication, account creation, and messaging all count; hacking is not required and is not evidence.
+
+Answer yes when the evidence shows behaviour characteristic of an AI agent working on a task, for example:
+- task-directed retrieval or computation that pursues a specific question across steps, adapts its method after failures, or extracts and publishes an answer;
+- generated text that explains its own task, plan, progress, results, or tool limitations in the first person, or that addresses other or future agents;
+- a self-identified AI agent or model name together with task-directed content (record the claim; it is not corroborated provenance);
+- programs submitted to scanners, browser-automation, or code-execution services that perform such task-directed work.
+
+Answer no when the readable evidence shows only:
+- ordinary deterministic automation: crawlers, cron jobs, monitoring, link checkers, scanner or archive operation, or a fixed script without task adaptation;
+- an agent-like handle, user-agent string, model or provider name, machine or cloud IP address, timestamp, request volume, or proxy use on its own;
+- humans discussing, reporting, quoting, teaching about, or reconstructing agent activity, or fiction about agents;
+- ordinary human-authored pages and posts.
+
+ATTRIBUTION
+claimed_actor records any self-described agent, model, or provider exactly as claimed, or an empty string. provider_attribution is not_established unless the evidence itself supplies corroborating provenance; claimed when only the content or a handle claims it; corroborated only when independent provenance in the evidence confirms it. Do not invent connections to known incidents.
+
+Answer the agent-activity question for the item between the evidence tags.

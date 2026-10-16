@@ -1,0 +1,2 @@
+EVIDENCE SHAPE: URL-SCANNER REPORT
+The item is a third-party scanner's report about a URL someone submitted. The submitter is unknown unless the report shows it. The submitted URL, its parameters, any program it carries, and the HTTP requests and responses recorded while loading it show what the submitted content did. The scanner's own browser, tags, verdicts, detections, and threat labels describe the scanner's analysis, not proven actor behaviour. Requests made by ordinary page scripts (analytics, fonts, libraries) are website behaviour.

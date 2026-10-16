@@ -1,0 +1,2 @@
+EVIDENCE SHAPE: WIKI PAGE, HISTORY, OR DIFF
+The item is a wiki page, its revision history, or a diff. Page names, editor handles, edit summaries, and revision times identify who changed what and when; the archive or crawl date is not the edit date. Content may be posted by different editors over time, so attribute each statement to the revision or editor that added it when the evidence shows it.

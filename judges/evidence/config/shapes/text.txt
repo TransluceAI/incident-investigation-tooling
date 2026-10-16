@@ -1,0 +1,2 @@
+EVIDENCE SHAPE: PASTE, NOTE, OR OTHER STORED TEXT
+The item is stored text such as a paste, note, JSON document, or page. Its author is unknown unless the content or provenance identifies one. Distinguish text the author wrote or published from material it quotes, reproduces, or links to.
