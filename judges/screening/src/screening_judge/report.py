@@ -132,7 +132,8 @@ def reconcile(run, output_dirs, thresholds=None, near_miss_threshold=0.2):
             expected[(w["item_id"], axis)].append(uid)
             row = outputs.get(uid)
             if row is None:
-                pending.append({"unit_id": uid, "item_id": w["item_id"], "axis": axis})
+                pending.append({"unit_id": uid, "item_id": w["item_id"], "axis": axis,
+                                "source": items[w["item_id"]]["source"]})
                 continue
             probs = row["label_probs"]
             base = {"unit_id": uid, "item_id": w["item_id"], "axis": axis, "window_id": w["window_id"],
@@ -245,6 +246,14 @@ def write_report(dest, config, results, judgments, failures, pending, unverified
     control_rows = [r for r in results if r["source"] == control_set.SOURCE]
     results = [r for r in results if r["source"] != control_set.SOURCE]
     queue = [q for q in queue if q["source"] != control_set.SOURCE]
+    control_counts = {}
+    for name, rows in (("failed", failures), ("pending", pending), ("unverified_candidates", unverified)):
+        control_counts[name] = sum(r["source"] == control_set.SOURCE for r in rows)
+    failures = [r for r in failures if r["source"] != control_set.SOURCE]
+    all_pending = len(pending)
+    pending = [r for r in pending if r["source"] != control_set.SOURCE]
+    unverified = [r for r in unverified if r["source"] != control_set.SOURCE]
+    near = [r for r in near if r["source"] != control_set.SOURCE]
     dest.mkdir(parents=True, exist_ok=True)
     write_jsonl(dest / "control-results.jsonl", control_rows)
     for name, rows in (("item-results", results), ("judgments", judgments), ("failures", failures),
@@ -265,8 +274,8 @@ def write_report(dest, config, results, judgments, failures, pending, unverified
         window_rate[a] = {b: {"items": len(v), "positive_rate": sum(v) / len(v)} for b, v in sorted(groups.items())}
     summary = {
         "version": config.get("version"), "thresholds": thresholds or None,
-        "controls": control_set.score(control_rows),
-        "items": len(results), "requests_expected": len(judgments) + len(pending),
+        "controls": {**control_set.score(control_rows), **control_counts},
+        "items": len(results), "requests_expected": len(judgments) + all_pending,
         "validated": sum(j["validation_status"] == "validated" for j in judgments),
         "failed": len(failures), "pending": len(pending), "unverified_candidates": len(unverified),
         "near_misses": len(near), "assessments": by_axis,
@@ -281,7 +290,7 @@ def write_report(dest, config, results, judgments, failures, pending, unverified
         "confidence_on_negatives": {"validated_no": len(negative), "above_half": sum(
             type(j["result"].get("confidence")) in (int, float) and j["result"]["confidence"] > .5 for j in negative)},
         "failure_reasons": dict(Counter(f["validation_error"].split(":")[0] for f in failures)),
-        "scope": "Screening for expert review. Request counts include controls; item counts exclude them.",
+        "scope": "Screening for expert review. requests_expected, validated and label-score diagnostics include controls; item counts and reviewer files exclude them.",
         "score_semantics": "label_probs/p_yes are diagnostic first-token branch scores, not calibrated probabilities.",
         "release_ready": False,
         "release_note": "Requires held-out accuracy, per-axis labels, actual-model canaries and runtime validation.",

@@ -105,7 +105,8 @@ def windows(segments, count, budget, overlap=2000):
     count(text) must return the full prompt token count for a rendered window.
     """
     full = render_citable(segments)[0]
-    if count(full) <= budget:
+    full_tokens = count(full)
+    if full_tokens <= budget:
         yield segments, {s["segment_id"]: [0, len(s["text"])] for s in segments}
         return
     # count() includes the prompt around the evidence, so repeated context gets a
@@ -122,18 +123,37 @@ def windows(segments, count, budget, overlap=2000):
         # Provenance too long to repeat whole is windowed like a body; every window
         # still carries its leading lines so no body window loses its provenance.
         fixed.append(provenance_header(s, fixed, count, limit))
+    # Density is only a starting guess; every accepted slice is counted exactly.
+    chars_per_token = len(full) / max(full_tokens - overhead, 1)
+    fixed_tokens = count(render_citable(fixed)[0])
+    guess = max(1, int((budget - fixed_tokens) * chars_per_token * 0.97))
     for s in variable:
         start = 0
         while start < len(s["text"]) or (start == 0 and not s["text"]):
             remaining = len(s["text"]) - start
-            lo = min(remaining, budget * 2)
-            while True:
-                part = {**s, "text": s["text"][start:start + lo]}
-                if count(render_citable(fixed + [part])[0]) <= budget:
-                    break
-                if lo == 0:
-                    raise ValueError("Context segments alone exceed window budget")
-                lo = int(lo * 0.8)
+            def fits(size):
+                part = {**s, "text": s["text"][start:start + size]}
+                return count(render_citable(fixed + [part])[0]) <= budget
+
+            size = min(remaining, guess)
+            lo, hi = 0, size
+            if fits(size):
+                lo = size
+                while lo < remaining:
+                    hi = min(remaining, max(lo + 1, lo * 2))
+                    if not fits(hi):
+                        break
+                    lo = hi
+            # Stop within 1% of the fitting slice, avoiding token-by-token search.
+            # A tokenizer need not be monotone: only measured fits become `lo`.
+            while hi - lo > max(1, lo // 100):
+                mid = (lo + hi) // 2
+                if fits(mid):
+                    lo = mid
+                else:
+                    hi = mid
+            if not remaining and not fits(0):
+                raise ValueError("Context segments alone exceed window budget")
             if not lo and remaining:
                 raise ValueError("No window fits; refusing to omit evidence")
             end = start + lo

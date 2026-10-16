@@ -7,9 +7,9 @@ abstain value; likely/possible are derived later from calibrated probabilities.
 
 Only JSON-schema keywords already exercised with the cluster's vLLM grammar
 backend are used (type, enum, properties, required, additionalProperties,
-items, maxItems, maxLength, minimum). Non-empty and uniqueness rules are
-enforced by validate.py instead. The opt-in citation_schema() adds anyOf,
-maximum and minItems, the shape the Arquivo GPU pilot exercised (vLLM 0.31.0,
+items, maxItems, maxLength, minimum, maximum). Non-empty and uniqueness rules are
+enforced by validate.py instead. The default-on citation_schema() adds anyOf and
+minItems, the shape the Arquivo GPU pilot exercised (vLLM 0.31.0,
 xgrammar 0.2.7).
 """
 AXES = ("hacking", "agentic_activity", "coordination")
@@ -85,7 +85,7 @@ def schema(axis: str) -> dict:
 
 
 def citation_schema(axis: str, chunks: dict) -> dict:
-    """schema(axis) narrowed to one window's citable chunks (opt-in citation_constraints).
+    """schema(axis) narrowed to one window's citable chunks (citation_constraints).
 
     Grammar decoding then cannot emit an unknown segment ID or an out-of-range
     chunk number, and every action names at least one citable segment. The copy

@@ -290,6 +290,27 @@ class EvidenceTests(unittest.TestCase):
                 covered.update(range(c['source_start'],c['source_end']))
         self.assertEqual(covered,set(range(len(body))))
 
+    def test_windows_fill_budget_and_preserve_unicode_source(self):
+        body = 'ordinary browser response café 日本語 😀 ' * 2000
+        segments = [{'segment_id': 'S0', 'kind': 'PROVENANCE', 'source': 'records', 'text': 'observed request'},
+                    {'segment_id': 'S1', 'kind': 'BODY_VIEW', 'source': 'document:x', 'text': body}]
+        for count in (lambda text: 800 + len(text)//4, lambda text: 800 + len(text.encode('utf-8'))):
+            with self.subTest(count=count):
+                end = 0
+                for parts, offsets in windows(segments, count, 6000):
+                    text, spans, chunks = render_citable(parts, offsets)
+                    validate_chunk_map({'text': text, 'segment_spans': spans,
+                                        'evidence_chunks': chunks, 'source_offsets': offsets})
+                    start, stop = offsets['S1']
+                    self.assertLessEqual(start, end)
+                    self.assertGreater(stop, end)
+                    self.assertEqual(next(p['text'] for p in parts if p['segment_id'] == 'S1'), body[start:stop])
+                    self.assertLessEqual(count(text), 6000)
+                    if stop < len(body):
+                        self.assertGreaterEqual(count(text), 5700)
+                    end = stop
+                self.assertEqual(end, len(body))
+
     def test_every_window_carries_provenance(self):
         def segments(provenance):
             return [{'segment_id': 'S0', 'kind': 'ITEM', 'source': 'item', 'text': 'source: paste.example'},
@@ -393,7 +414,8 @@ class ReportSuccessTests(unittest.TestCase):
         self.prepare([self.record()])
         summary = write_report(self.run/'report', *reconcile(self.run, []), None)
         self.assertEqual(summary['controls'],
-                         {'checks': [], 'passed': 0, 'total': 0, 'not_requested': 0})
+                         {'checks': [], 'passed': 0, 'total': 0, 'not_requested': 0,
+                          'failed': 0, 'pending': 0, 'unverified_candidates': 0})
         self.assertEqual(list(iter_jsonl(self.run/'report/control-results.jsonl')), [])
         self.assertEqual(summary['pending'], 3)
 
@@ -408,6 +430,31 @@ class ReportSuccessTests(unittest.TestCase):
         self.assertTrue(all(c['passed'] is False for c in scored['checks']))
         self.assertEqual(len(list(iter_jsonl(self.run/'report/control-results.jsonl'))),
                          len(controls.CONTROLS))
+
+    def test_controls_are_excluded_from_all_reviewer_files(self):
+        write_jsonl(self.data/'resources/sample/records.jsonl', [self.record()])
+        self.run = self.root/'run'
+        prepared = prepare(self.data, self.run, lambda chat: sum(len(m['content']) for m in chat),
+                           15000, config(), with_controls=True)
+        requests = [r for r in iter_jsonl(self.run/'requests.jsonl') if r['custom_id'].startswith('control-')]
+        rows = []
+        for request, label in zip(requests, ('yes', 'no')):
+            uid = request['custom_id']
+            res = result(uid.rsplit(':', 1)[1], label)  # yes deliberately lacks citations
+            rows.append({**answered(self.run, uid), 'status': 'success', 'result': res,
+                         'logprobs': scored(res, .6)})
+        write_worker(self.run, rows)
+        summary = write_report(self.run/'report', *reconcile(self.run, [self.run/'outputs']), None)
+        for name in ('item-results', 'failures', 'pending', 'unverified-candidates',
+                     'near-misses', 'review-queue', 'injection-review'):
+            self.assertFalse(any(r['source'] == controls.SOURCE
+                                 for r in iter_jsonl(self.run/f'report/{name}.jsonl')), name)
+        self.assertEqual(len(list(iter_jsonl(self.run/'report/judgments.jsonl'))), 2)
+        self.assertEqual(summary['requests_expected'], prepared['requests'])
+        self.assertEqual((summary['failed'], summary['pending'], summary['unverified_candidates']), (0, 3, 0))
+        self.assertEqual(summary['controls']['failed'], 1)
+        self.assertEqual(summary['controls']['unverified_candidates'], 1)
+        self.assertEqual(summary['controls']['pending'], len(requests) - 2)
 
     def test_verified_positive_and_failed_citation_are_separate(self):
         self.prepare([self.record()])

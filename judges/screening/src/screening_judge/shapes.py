@@ -92,14 +92,15 @@ def build_segments(item: dict, bodies: list) -> list:
             except ValueError:
                 doc = None
         if isinstance(doc, dict) and scanner.detect(doc):
-            rendered, _ = scanner.view(doc)
-            _add(segs, iid, "BODY_VIEW", f"document:{path}#json-pointer", rendered)
+            view, _ = scanner.view(doc)
+            _add(segs, iid, "BODY_VIEW", f"document:{path}#json-pointer", view)
         else:
-            _add(segs, iid, "BODY", f"document:{path}", text)
+            view = text
+            _add(segs, iid, "BODY", f"document:{path}", view)
         if shape in ("message", "text", "wiki", "scanner", "capture"):
-            urls = list(dict.fromkeys(URL_RE.findall(rendered if isinstance(doc, dict) and scanner.detect(doc) else text)))
-            for url in urls[:MAX_BODY_URL_VIEWS]:
-                _url_views(segs, iid, url, f"document:{path}:body_url:{urls.index(url)}")
+            urls = list(dict.fromkeys(URL_RE.findall(view)))
+            for n, url in enumerate(urls[:MAX_BODY_URL_VIEWS]):
+                _url_views(segs, iid, url, f"document:{path}:body_url:{n}")
             if len(urls) > MAX_BODY_URL_VIEWS:
                 _add(segs, iid, "DECODE_GAP", "body_url",
                      f"not decoded: {len(urls) - MAX_BODY_URL_VIEWS} further URLs remain readable in BODY")

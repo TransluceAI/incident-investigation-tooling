@@ -73,8 +73,24 @@ class AdapterTests(unittest.TestCase):
             rows=list(iter_jsonl(p));rows[0]['text_sha256']='0'*64;write_jsonl(p,rows)
             summary=prepare(data,run,lambda chat:sum(len(m['content']) for m in chat)//3,6000,config(),with_controls=False)
             gaps=list(iter_jsonl(run/'gaps.jsonl'))
-            self.assertTrue(any(g['gap']=='document_hash_mismatch' and g['path']=='documents/index.jsonl' for g in gaps))
+            self.assertEqual(sum(g['gap']=='document_hash_mismatch' and g['path']=='documents/index.jsonl' for g in gaps), 1)
             self.assertEqual(summary['excluded_integrity'],2)
+
+    def test_arquivo_index_is_read_once(self):
+        from collections import Counter
+        from screening_judge.prepare import Corpus
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            data = build(root/'data')
+            reads = Counter()
+            original = Corpus.read
+            def read(corpus, path):
+                reads[path] += 1
+                return original(corpus, path)
+            with patch.object(Corpus, 'read', read):
+                prepare(data, root/'run', lambda chat: sum(len(m['content']) for m in chat)//3,
+                        6000, config(), with_controls=False)
+            self.assertEqual(reads['documents/index.jsonl'], 1)
 
     def test_classifier_identity_ignores_nonce_but_not_policy(self):
         a={**config(),'prompts':load_prompts(),'schemas':schemas(),'boundary_salt':'test'}
