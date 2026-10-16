@@ -49,7 +49,7 @@ class AdapterTests(unittest.TestCase):
             records = list(iter_jsonl(path))
             records[0]['metadata']['requests'] = [{'payload': {'nested': {'value': 'NESTED_PAYLOAD_SIGNAL'}}}]
             write_jsonl(path, records)
-            summary=prepare(data,run,lambda chat:sum(len(m['content']) for m in chat)//3,4500,config(),shards=3)
+            summary=prepare(data,run,lambda chat:sum(len(m['content']) for m in chat)//3,6000,config(),shards=3)
             self.assertEqual(set(summary['items_by_shape']),set(shapes.SHAPES))
             self.assertEqual(summary['excluded_integrity'],1)
             self.assertGreater(summary['windowed_items'],0)

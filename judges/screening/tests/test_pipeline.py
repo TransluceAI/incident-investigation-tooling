@@ -38,7 +38,8 @@ def answered(run, uid):
 
 def result(axis, label='no'):
     r = {'evidence': [], 'policy_basis': 'test', 'rationale': 'Test fixture.',
-         'label': label, 'injection_detected': False, 'missing_evidence': []}
+         'label': label, 'confidence': 0.9 if label == 'yes' else 0.1,
+         'injection_detected': False, 'missing_evidence': []}
     if axis == 'hacking':
         r.update(categories=[], boundary='', authorization='', actions=[])
     elif axis == 'agentic_activity':
@@ -362,7 +363,7 @@ class ReviewQueueTests(unittest.TestCase):
     prepare = PipelineTests.prepare
     record = PipelineTests.record
 
-    def test_queue_holds_positives_abstentions_and_failures_by_p_yes(self):
+    def test_queue_holds_positives_abstentions_and_failures_by_confidence(self):
         self.prepare([self.record()])
         w = next(iter_jsonl(self.run/'windows.jsonl'))
         sid = next(k for k, v in w['segment_kinds'].items() if v == 'BODY')
@@ -381,10 +382,19 @@ class ReviewQueueTests(unittest.TestCase):
         parts = reconcile(self.run, [self.run/'outputs'])
         queue = parts[7]
         self.assertEqual([(q['axis'], q['queue_reason']) for q in queue],
-                         [('agentic_activity', 'abstention'), ('hacking', 'positive'), ('coordination', 'failure')])
-        self.assertEqual([round(q['p_yes'], 6) if q['p_yes'] is not None else None for q in queue], [.6, .3, None])
-        self.assertTrue(all('assessment' not in q for q in queue))  # no uncalibrated confidence band
-        self.assertEqual(queue[1]['findings_cyberattack'], ['SQL injection'])
+                         [('hacking', 'positive'), ('agentic_activity', 'abstention'), ('coordination', 'failure')])
+        self.assertEqual([q['confidence'] for q in queue], [.9, .1, None])  # model score first, missing last
+        self.assertTrue(all('assessment' not in q for q in queue))
+        self.assertEqual(queue[0]['findings_cyberattack'], ['SQL injection'])
+        self.assertEqual(parts[1][0]['axes']['hacking']['confidence_max'], .9)
+        # Equal confidence falls back to P(yes) from the label logprobs.
+        abstain['confidence'] = .9
+        rows[1]['logprobs'] = scored(abstain, .6)
+        write_worker(self.run, rows)
+        tied = reconcile(self.run, [self.run/'outputs'])[7]
+        self.assertEqual([q['axis'] for q in tied], ['agentic_activity', 'hacking', 'coordination'])
+        self.assertEqual([round(q['p_yes'], 6) if q['p_yes'] is not None else None for q in tied], [.6, .3, None])
+        parts = reconcile(self.run, [self.run/'outputs'])
         summary = write_report(self.run/'report', *parts, None)
         self.assertEqual(summary['review_queue'], {'positive': 1, 'abstention': 1, 'failure': 1})
         # A negative answer is not queued.

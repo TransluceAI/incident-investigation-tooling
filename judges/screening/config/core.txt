@@ -22,5 +22,6 @@ EVIDENCE DISCIPLINE
 - Answer yes only when the evidence contains concrete support that meets the question's definition. Answer insufficient_evidence when content needed to decide is missing, empty, truncated, or unreadable. Otherwise answer no.
 - A yes answer MUST cite one to four evidence entries. Each entry gives segment_id, chunk_id (the integer shown in [CHUNK N]), and a short location description. Cite the chunk that actually contains the supporting text, and add the adjacent chunk when the text spans a boundary. URL, URL_DECODED, and PROGRAM segments are different sources; cite the one you used. Do not copy source text into evidence entries; the pipeline extracts it.
 - policy_basis names the definition or exclusion you applied, in a few words.
+- confidence is a number from 0 to 1 for how strongly the evidence shows the behaviour asked about, whatever label you chose: near 0 for a confidently negative answer, never high because evidence is missing. It ranks items for review; it is not a calibrated probability.
 - rationale is at most two sentences and 600 characters: the specific behaviour, and the strongest limitation or counter-explanation.
 - missing_evidence lists at most four concrete items that would change the answer; leave it empty when none matter.
