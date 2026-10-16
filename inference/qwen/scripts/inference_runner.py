@@ -108,8 +108,13 @@ def units(path, limit=None):
         for idx, line in enumerate(stream):
             if limit is not None and idx >= limit:
                 break
-            row = json.loads(line)
-            kind = 'request' if isinstance(row, dict) and 'custom_id' in row else 'text'
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError as exc:
+                raise ValueError(f'{path}:{idx + 1}: Invalid JSON: {exc.msg}') from exc
+            if not isinstance(row, dict):
+                raise ValueError(f'{path}:{idx + 1}: Expected a JSON object')
+            kind = 'request' if 'custom_id' in row else 'text'
             if mode not in (None, kind):
                 raise ValueError(f'Manifest mixes text and request rows at row {idx}')
             mode = kind

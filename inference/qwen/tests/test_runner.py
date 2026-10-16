@@ -62,6 +62,17 @@ class RecoveryTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             list(r.units(p))
 
+    def test_malformed_manifest_rows_report_path_and_line(self):
+        path = self.root / 'input.jsonl'
+        for invalid in ('[]', 'null', 'true', '42', '"text"', '', '{'):
+            with self.subTest(invalid=invalid):
+                path.write_text(json.dumps(self.row) + '\n' + invalid + '\n')
+                with self.assertRaises(ValueError) as error:
+                    list(r.units(path))
+                self.assertIn(f'{path}:2:', str(error.exception))
+                self.assertIn('Invalid JSON' if invalid in ('', '{') else 'Expected a JSON object',
+                              str(error.exception))
+
     def test_interrupted_part_and_duplicate_detection(self):
         row = {**self.row, 'run_identity': 'run-a', 'status': 'success', 'input_tokens': 3,
                'output_tokens': 2, 'reasoning_tokens': 0, 'final_tokens': 2}
