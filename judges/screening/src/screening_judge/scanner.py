@@ -50,10 +50,3 @@ def view(doc) -> tuple[str, list]:
         _walk(doc[k], "/" + _escape(str(k)), lines)
     return "\n".join(f"{p} = {v}" for p, v in lines), lines
 
-
-def resolve(doc, pointer: str):
-    cur = doc
-    for raw in pointer.split("/")[1:]:
-        token = raw.replace("~1", "/").replace("~0", "~")
-        cur = cur[int(token)] if isinstance(cur, list) else cur[token]
-    return cur if isinstance(cur, str) else json.dumps(cur)

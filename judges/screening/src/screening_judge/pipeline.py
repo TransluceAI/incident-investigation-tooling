@@ -1,7 +1,6 @@
 """Command line: prepare, report, escalate, cascade, evaluate, compare."""
 import argparse
 import json
-from functools import lru_cache
 from pathlib import Path
 
 from . import cascade
@@ -17,7 +16,7 @@ def tokenizer_counter(config):
     def count(chat):
         return len(tok.apply_chat_template(chat, tokenize=True, return_dict=False, add_generation_prompt=True,
                                            **config.get("chat_template_kwargs", {})))
-    return _cached(count)
+    return count
 
 
 def char_counter(chars_per_token):
@@ -26,14 +25,7 @@ def char_counter(chars_per_token):
         raise ValueError("CHARS_PER_TOKEN must be positive")
     def count(chat):
         return sum(len(m["content"]) for m in chat) // chars_per_token + 16
-    return _cached(count)
-
-
-def _cached(count):
-    @lru_cache(maxsize=32)
-    def by_key(key):
-        return count(json.loads(key))
-    return lambda chat: by_key(json.dumps(chat))
+    return count
 
 
 def main():

@@ -64,10 +64,6 @@ def iter_jsonl(path):
                 yield json.loads(line)
 
 
-def read_jsonl(path) -> list:
-    return list(iter_jsonl(path))
-
-
 def classifier_hash(config):
     """Settings that affect classification, excluding run nonce/counting diagnostics."""
     stable = {k: v for k, v in config.items() if k not in {"boundary_salt", "token_count_mode"}}

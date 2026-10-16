@@ -402,7 +402,7 @@ class EvidenceTests(unittest.TestCase):
         doc={'report_id':'a','http':[{'request':{'post_data':{'hash':'payload signal','_id':'important'}}}]}
         text, lines=scanner.view(doc)
         self.assertIn('payload signal',text)
-        for p,v in lines: self.assertEqual(scanner.resolve(doc,p),v)
+        for p,v in lines: self.assertEqual(resolve_pointer(doc,p),v)
 
 
 class ReportSuccessTests(unittest.TestCase):
@@ -497,6 +497,15 @@ class ReportSuccessTests(unittest.TestCase):
         self.assertEqual(summary['unverified_candidates'], 0)
         self.assertEqual(summary['assessments']['agentic_activity'], {'incomplete': 1})
         self.assertEqual(summary['assessments']['coordination'], {'incomplete': 1})
+
+
+def resolve_pointer(doc, pointer):
+    """Follow an RFC 6901 pointer from scanner.view back into the document."""
+    cur = doc
+    for raw in pointer.split('/')[1:]:
+        token = raw.replace('~1', '/').replace('~0', '~')
+        cur = cur[int(token)] if isinstance(cur, list) else cur[token]
+    return cur if isinstance(cur, str) else json.dumps(cur)
 
 
 def scored(res, p_yes):
