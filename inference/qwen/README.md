@@ -176,10 +176,12 @@ Workers write `outputs/worker-<id>/part-*.jsonl`. Request results carry:
 
 When a request asked for logprobs, a successful row also has
 `logprobs: {"content": [{"token", "logprob", "top_logprobs": [{"token", "logprob"}]}]}`
-covering the final answer only (reasoning tokens are excluded). Candidates are
-those vLLM returned: the top `top_logprobs` plus the sampled token. Missing or
-non-finite values are `null`; a failed row has `logprobs: null`. Applications
-compute label scores from these values.
+covering the final answer only (reasoning and trailing special tokens such as
+EOS are excluded). Usage counts still include generated special tokens. Candidates
+are those vLLM returned: the top `top_logprobs` plus the sampled token. Missing or
+non-finite values are `null`. Missing or misaligned logprob tables fail the
+request as an engine error, without a format retry. A failed row has
+`logprobs: null`. Applications compute label scores from these values.
 
 `examples/requests.jsonl` is a synthetic request for preflight checks.
 

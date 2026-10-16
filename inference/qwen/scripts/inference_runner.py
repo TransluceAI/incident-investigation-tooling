@@ -184,23 +184,27 @@ def top_logprobs(row):
     return body.get('top_logprobs', 0) if body.get('logprobs') else None
 
 
-def final_logprobs(answer, start):
+def final_logprobs(answer, start, special_ids=()):
     """Chat-completions style logprobs for the final answer tokens (after reasoning).
 
     Each entry gives the sampled token and every candidate the engine returned
     (top-k plus the sampled token). Missing or non-finite values become null;
-    nothing is inferred. Returns None when the engine gave no aligned logprobs.
+    nothing is inferred. Missing or misaligned tables are an engine error.
+    Trailing special tokens (including EOS) are not part of answer text.
     """
     tables = getattr(answer, 'logprobs', None)
     ids = list(answer.token_ids)
     if not tables or len(tables) != len(ids):
-        return None
+        raise ValueError('Missing or misaligned generated-token logprobs')
+    end = len(ids)
+    while end > start and ids[end - 1] in special_ids:
+        end -= 1
 
     def value(lp):
         return lp if isinstance(lp, (int, float)) and math.isfinite(lp) else None
 
     content = []
-    for token_id, table in zip(ids[start:], tables[start:]):
+    for token_id, table in zip(ids[start:end], tables[start:end]):
         table = table or {}
         chosen = table.get(token_id)
         ranked = sorted(table.values(), key=lambda c: (getattr(c, 'rank', None) is None,
@@ -662,6 +666,13 @@ def run(resources):
                     answer = output.outputs[0]
                     parsed, error, answer_fields = validate_answer(
                         answer, output.prompt_token_ids, count, tokenizer, validator_for(row), enabled)
+                    logprobs = None
+                    if not error and top_logprobs(row) is not None:
+                        try:
+                            logprobs = final_logprobs(answer, answer_fields['reasoning_tokens'] or 0,
+                                                     getattr(tokenizer, 'all_special_ids', ()))
+                        except ValueError as exc:
+                            parsed, error = None, failure(exc)
                     status = 'failed' if error else 'success'
                     if 'body' in row:
                         # Request rows use the batch-result shape (README.md#result-rows).
@@ -686,8 +697,7 @@ def run(resources):
                                   'input_tokens': count, 'output_tokens': len(answer.token_ids),
                                   'finish_reason': answer.finish_reason, 'utc': now()}
                     if top_logprobs(row) is not None:
-                        result['logprobs'] = (None if error else
-                                              final_logprobs(answer, answer_fields['reasoning_tokens'] or 0))
+                        result['logprobs'] = logprobs
                     if controls['budget'] is not None:
                         result['thinking_budget_exhausted'] = budget_exhausted(
                             answer, answer_fields, controls['budget'], end_ids, start_id)

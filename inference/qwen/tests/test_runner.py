@@ -18,6 +18,8 @@ spec.loader.exec_module(r)
 
 
 class FakeTokenizer:
+    all_special_ids = [1, 2, 3]
+
     def apply_chat_template(self, chat, **kwargs):
         ids = self.encode(chat[-1]['content'])
         return ids + ([1, 10] if kwargs.get('enable_thinking') else [])

@@ -102,9 +102,20 @@ class RequestRowTests(unittest.TestCase):
         self.assertEqual(r.final_logprobs(answer, 2)['content'][1]['token'], None)
         for missing in (None, tables[:2]):
             answer.logprobs = missing
-            self.assertIsNone(r.final_logprobs(answer, 2))
+            with self.assertRaisesRegex(ValueError, 'Missing or misaligned') as error:
+                r.final_logprobs(answer, 2)
+            self.assertFalse(r.failure(error.exception).retryable)
 
     def test_full_runner_uses_each_requests_messages_schema_and_logprobs(self):
+        self.run_requests()
+
+    def test_missing_logprobs_cannot_be_committed_as_success(self):
+        self.run_requests('missing')
+
+    def test_misaligned_logprobs_cannot_be_committed_as_success(self):
+        self.run_requests('misaligned')
+
+    def run_requests(self, bad_logprobs=None):
         tokenizer = FakeTokenizer()
         calls, loads = [], []
 
@@ -113,7 +124,7 @@ class RequestRowTests(unittest.TestCase):
                      1000: SimpleNamespace(decoded_token='~', logprob=math.log(.25), rank=2)} for c in text]
 
         def answer(text, logprobs=None):
-            ids = tokenizer.encode(text)
+            ids = tokenizer.encode(text) + [3]
             return SimpleNamespace(token_ids=ids, text=text, finish_reason='stop', logprobs=logprobs)
 
         class FakeLLM:
@@ -126,7 +137,14 @@ class RequestRowTests(unittest.TestCase):
                 for chat, params in zip(chats, kwargs['sampling_params']):
                     # The second request's own schema needs a score, so a label fails it.
                     text = '{"label":"yes"}'
-                    logprobs = candidates(text) if 'logprobs' in params else None
+                    logprobs = None
+                    if 'logprobs' in params:
+                        logprobs = candidates(text) + [{3: SimpleNamespace(
+                            decoded_token='<eos>', logprob=-0.1, rank=1)}]
+                        if bad_logprobs == 'missing':
+                            logprobs = None
+                        elif bad_logprobs == 'misaligned':
+                            logprobs = logprobs[:-1]
                     outputs.append(SimpleNamespace(
                         prompt_token_ids=tokenizer.apply_chat_template(chat, **kwargs['chat_template_kwargs']),
                         outputs=[answer(text, logprobs)]))
@@ -163,14 +181,20 @@ class RequestRowTests(unittest.TestCase):
         self.assertEqual(params[0]['logprobs'], 3)
         self.assertNotIn('logprobs', params[1])
         self.assertEqual([o['custom_id'] for o in out], ['w0:hacking', 'w0:coordination'])
-        self.assertEqual([o['status'] for o in out], ['success', 'failed'])
+        self.assertEqual([o['status'] for o in out], ['failed' if bad_logprobs else 'success', 'failed'])
         self.assertEqual(out[0]['request_sha256'], r.request_hash(rows[0]['body']))
         self.assertFalse({'text_sha256', 'chunk_idx', 'final_output', 'input_tokens'} & set(out[0]))
         self.assertEqual(out[0]['content'], '{"label":"yes"}')
-        self.assertEqual(out[0]['usage'], {'prompt_tokens': len('first'), 'completion_tokens': 15,
-                                           'reasoning_tokens': 0, 'final_tokens': 15})
+        self.assertEqual(out[0]['usage'], {'prompt_tokens': len('first'), 'completion_tokens': 16,
+                                           'reasoning_tokens': 0, 'final_tokens': 16})
         self.assertEqual(out[1]['attempts'], [{'attempt': 1, 'error': out[1]['error'],
-                                               'finish_reason': 'stop', 'output_tokens': 15}])
+                                               'finish_reason': 'stop', 'output_tokens': 16}])
+        if bad_logprobs:
+            self.assertIsNone(out[0]['result'])
+            self.assertIsNone(out[0]['logprobs'])
+            self.assertIn('Missing or misaligned', out[0]['error'])
+            self.assertEqual(len(out[0]['attempts']), 1)
+            return
         content = out[0]['logprobs']['content']
         self.assertEqual(''.join(c['token'] for c in content), '{"label":"yes"}')
         self.assertEqual(len(content[0]['top_logprobs']), 2)
