@@ -18,7 +18,7 @@ from .schemas import AXES, schema
 CONFIG_DIR = Path(__file__).resolve().parents[2] / "config"
 if not (CONFIG_DIR / "core.txt").is_file():
     from importlib.resources import files
-    CONFIG_DIR = Path(str(files("evidence_judge_config")))
+    CONFIG_DIR = Path(str(files("screening_judge_config")))
 
 
 def load_prompts(config_dir=CONFIG_DIR) -> dict:

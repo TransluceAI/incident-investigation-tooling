@@ -1,7 +1,7 @@
 """Offline, resumable inference on prepared (window, axis) units. No corpus parsing.
 
 Adapted from the shared judges/arquivo runner. Changes: each unit names its
-axis and evidence shape; prompts come from evidence_judge.prompts; each axis has
+axis and evidence shape; prompts come from screening_judge.prompts; each axis has
 its own output schema; and the probability of the label is read from the
 label token's logprobs when ``label_logprobs`` is configured.
 """
@@ -20,7 +20,7 @@ import sys
 import time
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'src'))
-from evidence_judge import prompts  # noqa: E402
+from screening_judge import prompts  # noqa: E402
 
 LABELS = ('yes', 'no', 'insufficient_evidence')
 LABEL_KEY = re.compile(r'"label"\s*:\s*"$')

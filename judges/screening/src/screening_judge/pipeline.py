@@ -36,7 +36,7 @@ def _cached(count):
 
 
 def main():
-    p = argparse.ArgumentParser(prog="evidence-judge")
+    p = argparse.ArgumentParser(prog="screening-judge")
     sub = p.add_subparsers(dest="command", required=True)
     a = sub.add_parser("prepare", help="Build items, windows and the inference manifest")
     a.add_argument("--data-root", required=True)

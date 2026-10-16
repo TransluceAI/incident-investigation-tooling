@@ -7,12 +7,12 @@ import zlib
 from pathlib import Path
 from unittest.mock import patch
 
-from evidence_judge import decode, controls, shapes
-from evidence_judge.common import iter_jsonl, write_jsonl, sha256_text, classifier_hash
-from evidence_judge.prepare import prepare
-from evidence_judge.report import reconcile
+from screening_judge import decode, controls, shapes
+from screening_judge.common import iter_jsonl, write_jsonl, classifier_hash
+from screening_judge.prepare import prepare
+from screening_judge.report import reconcile
 from fixtures import build
-from test_pipeline import config, write_worker
+from test_pipeline import config
 
 class AdapterTests(unittest.TestCase):
     def test_base64_path_zlib_gzip_and_code_key(self):
@@ -38,17 +38,21 @@ class AdapterTests(unittest.TestCase):
         self.assertEqual({c[1] for c in controls.CONTROLS},set(shapes.SHAPES))
         for item,bodies,_,_ in controls.control_items():
             text='\n'.join(s['text'] for s in shapes.build_segments(item,bodies))
-            self.assertNotIn('control-'+item['item_id'],text)
-            self.assertNotIn('observation_id='+item['item_id'],text)
+            self.assertNotIn(item['item_id'], text)
 
     def test_multi_source_end_to_end_prepare_shard_report(self):
         with tempfile.TemporaryDirectory() as tmp:
             root=Path(tmp);data=build(root/'data');run=root/'run'
+            path = data/'resources/new.example/records.jsonl'
+            records = list(iter_jsonl(path))
+            records[0]['metadata']['requests'] = [{'payload': {'nested': {'value': 'NESTED_PAYLOAD_SIGNAL'}}}]
+            write_jsonl(path, records)
             summary=prepare(data,run,lambda chat:sum(len(m['content']) for m in chat)//3,4500,config(),shards=3)
             self.assertEqual(set(summary['items_by_shape']),set(shapes.SHAPES))
             self.assertEqual(summary['excluded_integrity'],1)
             self.assertGreater(summary['windowed_items'],0)
             original=list(iter_jsonl(run/'manifest.jsonl'))
+            self.assertTrue(any('NESTED_PAYLOAD_SIGNAL' in row['text'] for row in original))
             sharded=[r for f in sorted((run/'shards').glob('*.jsonl')) for r in iter_jsonl(f)]
             self.assertEqual(sorted(r['unit_id'] for r in original),sorted(r['unit_id'] for r in sharded))
             parts=reconcile(run,[])
@@ -74,7 +78,6 @@ class AdapterTests(unittest.TestCase):
         b['prompts']['axes']['hacking']+=' changed'
         self.assertNotEqual(classifier_hash(a),classifier_hash(b))
 
-if __name__=='__main__':unittest.main()
 
 class AdditionalIntegrityTests(unittest.TestCase):
     def test_malformed_record_fields_are_gaps(self):
@@ -102,3 +105,6 @@ class ProfileContractTests(unittest.TestCase):
             views,gaps=decode.decode_url('https://a.example/'+base64.urlsafe_b64encode(payload).decode())
             self.assertTrue(gaps)
             self.assertFalse(any(v['kind']=='DECODED_B64' for v in views))
+
+if __name__ == '__main__':
+    unittest.main()
