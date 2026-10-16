@@ -8,7 +8,7 @@ or in each request row. See [input and output formats](#input-and-output-formats
 
 ## Layout
 
-- `scripts/`: release build, runtime installation, pinned model download, submission,
+- `scripts/`: runtime installation, pinned model download, submission,
   Slurm worker, and inference runner.
 - `config/`: named model profiles with synthetic text-transport prompts/schemas.
 - `examples/`: synthetic text and request inputs for smoke checks.
@@ -35,16 +35,17 @@ boundaries and a compatible chat template.
 
 ## Install on the cluster
 
-Build each release from a commit into storage visible at the same absolute path
-on the Slurm login and worker nodes. `build_release.sh` exports `inference/qwen` at that commit with `git archive` and writes the commit to
-`RELEASE`; submissions copy it into the run directory as `release.txt`. Use a Linux
-CUDA environment compatible with the recorded runtime, and an installed `uv`
-command. Installation and download happen on the login node; inference jobs use
-offline model files.
+Clone the repository onto shared storage visible at the same absolute path on
+Slurm login and worker nodes, then check out the commit to run. Use a Linux CUDA
+environment compatible with the pinned runtime and an installed `uv` command.
+Installation and download happen on the login node. Inference jobs use offline
+model files.
 
 ```bash
-inference/qwen/scripts/build_release.sh <commit> /absolute/path/to/releases/<name>
-cd /absolute/path/to/releases/<name>
+git clone <repository-url> /absolute/path/to/incident-investigation-tooling
+cd /absolute/path/to/incident-investigation-tooling
+git checkout --detach <commit>
+cd inference/qwen
 bash scripts/install_runtime.sh
 .runtime/venv/bin/python scripts/download_model.py
 ```
@@ -244,7 +245,7 @@ any accepted job in `job-ids.txt`, and only then remove that marker before resum
 python3 -m venv .venv
 .venv/bin/python -m pip install -r requirements-test.txt
 .venv/bin/python -m unittest discover -s tests -v
-bash -n scripts/build_release.sh scripts/install_runtime.sh scripts/run.sbatch
+bash -n scripts/install_runtime.sh scripts/run.sbatch
 ```
 
 The CPU tests use synthetic schemas and data with simulated model and scheduler

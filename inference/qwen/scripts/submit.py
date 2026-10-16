@@ -11,11 +11,11 @@ import re
 import shutil
 import subprocess
 
-RELEASE = Path(__file__).resolve().parent.parent
+TOOL_DIR = Path(__file__).resolve().parent.parent
 
 
 def pinned_python(path):
-    # Resolve release-directory aliases, but retain the venv's bin/python entry:
+    # Resolve directory aliases, but retain the venv's bin/python entry:
     # resolving that final symlink would bypass the virtual environment.
     path = path.expanduser().absolute()
     return path.parent.resolve(strict=True) / path.name
@@ -89,10 +89,10 @@ def main():
         p.error('Input paths must be nonempty and distinct')
     if any('\n' in str(path) or not path.is_file() or path.stat().st_size == 0 for path in paths):
         p.error('Each input must be a nonempty file with no newline in its path')
-    config = args.config or RELEASE/'.runtime/config/qwen3.8-27b-fp8.json'
+    config = args.config or TOOL_DIR/'.runtime/config/qwen3.8-27b-fp8.json'
     try:
         python = (Path((run/'python.txt').read_text().strip()) if args.resume else
-                  pinned_python(args.python or RELEASE/'.runtime/venv/bin/python'))
+                  pinned_python(args.python or TOOL_DIR/'.runtime/venv/bin/python'))
     except OSError as exc:
         p.error(f'Python runtime is unavailable; install it or pass --python: {exc}')
     if not python.is_file() or not os.access(python, os.X_OK):
@@ -127,15 +127,11 @@ def main():
             if (run/'inputs.txt').exists():
                 p.error('Run was already prepared; use --resume')
             shutil.copyfile(config, run/'config.json')
-            shutil.copyfile(RELEASE/'scripts/inference_runner.py', run/'inference_runner.py')
-            shutil.copyfile(RELEASE/'scripts/run.sbatch', run/'run.sbatch')
+            shutil.copyfile(TOOL_DIR/'scripts/inference_runner.py', run/'inference_runner.py')
+            shutil.copyfile(TOOL_DIR/'scripts/run.sbatch', run/'run.sbatch')
             (run/'python.txt').write_text(str(python)+'\n')
             (run/'inputs.txt').write_text(''.join(str(path)+'\n' for path in paths))
-            # A release built by build_release.sh records its commit; keep it with the run.
             saved = ['config.json','inference_runner.py','run.sbatch','inputs.txt','python.txt']
-            if (RELEASE/'RELEASE').is_file():
-                shutil.copyfile(RELEASE/'RELEASE', run/'release.txt')
-                saved.append('release.txt')
             hashes = {str(path): sha(path) for path in paths}
             hashes.update({str(run/name):sha(run/name) for name in saved})
             (run/'hashes.json').write_text(json.dumps(hashes,indent=2)+'\n')
