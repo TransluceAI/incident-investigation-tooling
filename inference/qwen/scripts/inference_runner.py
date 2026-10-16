@@ -664,6 +664,9 @@ def run(resources):
                     if len(output.outputs) != 1:
                         raise RuntimeError('Expected exactly one model output per unit; batch not committed')
                     answer = output.outputs[0]
+                    if answer.finish_reason not in ('stop', 'length', 'repetition'):
+                        raise RuntimeError(f'Engine terminated generation ({answer.finish_reason}); '
+                                           'batch not committed, resume to regenerate it')
                     parsed, error, answer_fields = validate_answer(
                         answer, output.prompt_token_ids, count, tokenizer, validator_for(row), enabled)
                     logprobs = None

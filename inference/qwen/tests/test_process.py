@@ -19,13 +19,21 @@ from test_runner import FakeTokenizer, r
 
 
 def engine_child(root):
-    for line in sys.stdin:
+    for call, line in enumerate(sys.stdin, 1):
         (root / 'engine-ready').touch()
         while not (root / 'release-engine').exists():
             time.sleep(0.01)
         with (root / 'generated.jsonl').open('a') as out:
             out.write(line)
-        print('{}', flush=True)
+        finishes = ['stop'] * len(json.loads(line))
+        fault_path = root / 'fault.json'
+        if fault_path.exists():
+            fault = json.loads(fault_path.read_text())
+            if call == fault['call']:
+                finishes[-1] = fault['reason']
+            elif fault.get('retry') and call == fault['call'] - 1:
+                finishes[-1] = 'length'
+        print(json.dumps(finishes), flush=True)
 
 
 def run_with_engine(root, argv):
@@ -42,13 +50,15 @@ def run_with_engine(root, argv):
         def chat(self, chats, **kwargs):
             self.child.stdin.write(json.dumps(chats) + '\n')
             self.child.stdin.flush()
-            text = self.child.stdout.readline().strip()
-            if not text:
+            response = self.child.stdout.readline().strip()
+            if not response:
                 raise RuntimeError('Engine child died during generation')
+            finishes = json.loads(response)
+            text = '{}'
             return [SimpleNamespace(
                 prompt_token_ids=tokenizer.apply_chat_template(chat),
-                outputs=[SimpleNamespace(token_ids=tokenizer.encode(text), text=text, finish_reason='stop')])
-                for chat in chats]
+                outputs=[SimpleNamespace(token_ids=tokenizer.encode(text), text=text, finish_reason=finish)])
+                for chat, finish in zip(chats, finishes)]
 
     sys.modules.update({
         'transformers': SimpleNamespace(AutoTokenizer=SimpleNamespace(from_pretrained=lambda *a, **k: tokenizer)),
@@ -74,6 +84,50 @@ class ProcessTests(unittest.TestCase):
 
     def test_runner_sigterm_leaves_engine_alive_and_commits(self):
         self.exercise_stop('signal')
+
+    def test_engine_abort_and_error_leave_batch_resumable(self):
+        for reason in ('abort', 'error'):
+            for retry in (False, True):
+                with self.subTest(reason=reason, retry=retry), tempfile.TemporaryDirectory() as tmp:
+                    root = Path(tmp)
+                    (root / 'clock').write_text('0')
+                    (root / 'release-engine').touch()
+                    (root / 'fault.json').write_text(json.dumps({
+                        'call': 3 if retry else 2, 'reason': reason, 'retry': retry}))
+                    config = {'model': '/fake/model', 'schema': {'type': 'object'},
+                              'chat_template_kwargs': {'enable_thinking': False},
+                              'engine': {'max_model_len': 100}, 'sampling': {'max_tokens': 10},
+                              'host_batch_records': 2, 'host_batch_tokens': 100,
+                              'retry': {'max_attempts': 2}}
+                    (root / 'config.json').write_text(json.dumps(config))
+                    (root / 'input.jsonl').write_text(''.join(json.dumps({
+                        'custom_id': str(i), 'body': {'messages': [{'role': 'user', 'content': str(i)}]}
+                    }) + '\n' for i in range(5)))
+                    argv = [sys.executable, '-B', __file__, 'runner', str(root),
+                            '--config', str(root / 'config.json'), '--input-manifest', str(root / 'input.jsonl'),
+                            '--output-dir', str(root / 'outputs'), '--worker-id', '0']
+                    env = {**os.environ, 'SLURM_JOB_END_TIME': ''}
+                    interrupted = subprocess.run(argv, env=env, capture_output=True, text=True, timeout=10)
+                    self.assertNotEqual(interrupted.returncode, 0)
+                    self.assertIn(f'Engine terminated generation ({reason})', interrupted.stderr)
+                    worker = root / 'outputs/worker-0'
+                    first = worker / 'part-000000.jsonl'
+                    original = first.read_bytes()
+                    self.assertEqual(list(worker.glob('part-*.jsonl')), [first])
+                    generated_before = (root / 'generated.jsonl').read_text().splitlines()
+                    self.assertEqual(len(generated_before), 3 if retry else 2)
+                    (root / 'fault.json').unlink()
+                    resumed = subprocess.run(argv + ['--resume'], env=env, capture_output=True,
+                                             text=True, timeout=10)
+                    self.assertEqual(resumed.returncode, 0, resumed.stdout + resumed.stderr)
+                    self.assertEqual(first.read_bytes(), original)
+                    rows = [json.loads(line) for part in sorted(worker.glob('part-*.jsonl'))
+                            for line in part.read_text().splitlines()]
+                    self.assertEqual([row['custom_id'] for row in rows], list(map(str, range(5))))
+                    self.assertTrue(all(row['status'] == 'success' for row in rows))
+                    generated_after = (root / 'generated.jsonl').read_text().splitlines()[len(generated_before):]
+                    self.assertEqual([[chat[-1]['content'] for chat in json.loads(line)]
+                                      for line in generated_after], [['2', '3'], ['4']])
 
     def exercise_stop(self, mode):
         with tempfile.TemporaryDirectory() as tmp:

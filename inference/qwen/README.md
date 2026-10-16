@@ -222,7 +222,9 @@ An explicit sampling seed increments on retry, and optional `retry.temperatures`
 repeat the same answer. Resume never retries committed failures. The drain cutoff
 or a SIGTERM/SIGINT sent directly to the runner prevents another batch or retry
 and lets the current generation finish before committing. Slurm cancellation
-and the hard deadline can terminate the engine too, losing the uncommitted batch.
+and the hard deadline can terminate the engine too. Engine aborts and errors
+leave the entire current batch uncommitted, including when they occur during a
+retry. Resume regenerates that batch and skips earlier committed parts.
 
 The profile key `citation_constraints` is rejected; supply constraints in the
 request schema.
