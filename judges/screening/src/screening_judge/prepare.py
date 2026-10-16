@@ -167,14 +167,16 @@ def item_bodies(item, corpus, gaps):
 
 
 def prepare(data_root, out, count, window_tokens, config_template, config_dir=None, with_controls=True, shards=1,
-            benchmark_manifest=None, label_logprobs=10):
+            benchmark_manifest=None, label_logprobs=10, citation_constraints=True):
     if window_tokens <= 0 or type(shards) is not int or shards < 1:
         raise ValueError("window_tokens and shards must be positive")
     if type(label_logprobs) is not int or not 0 <= label_logprobs <= 20:
         raise ValueError("label_logprobs must be an integer from 0 to 20")
     if "label_logprobs" in config_template:
         raise ValueError("Set label scores with --label-logprobs; runner profiles do not carry label_logprobs")
-    if type(config_template.get("citation_constraints", False)) is not bool:
+    if "citation_constraints" in config_template:
+        raise ValueError("Citation narrowing is a judge option (--no-citation-constraints), not a runner profile key")
+    if type(citation_constraints) is not bool:
         raise ValueError("citation_constraints must be true or false")
     out = Path(out)
     out.mkdir(parents=True, exist_ok=False)
@@ -182,6 +184,7 @@ def prepare(data_root, out, count, window_tokens, config_template, config_dir=No
     config = {**config_template, "version": VERSION, "prompts": load_prompts(config_dir) if config_dir else load_prompts(),
               "schemas": schemas(), "boundary_salt": secrets.token_hex(16),
               "window_tokens": window_tokens, "label_logprobs": label_logprobs,
+              "citation_constraints": citation_constraints,
               "preparation_implementation": {
                   name: sha256_file(Path(__file__).with_name(name + ".py"))
                   for name in ("arquivo_ledger", "benchmark", "common", "controls", "decode", "prepare",

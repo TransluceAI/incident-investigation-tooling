@@ -96,17 +96,18 @@ class PipelineTests(unittest.TestCase):
                          {'document_hash_mismatch', 'document_unreadable'})
 
     def test_all_axes_counted_for_window_budget(self):
-        rec = self.record(body='x'*3000)
+        rec = self.record(body='x'*9000)
         write_jsonl(self.data / 'resources/sample/records.jsonl', [rec])
-        coordination = load_prompts()['axes']['coordination'].strip()
+        coordination = load_prompts()['formats']['coordination']
         def count(chat):
             return len(chat[-1]['content']) + (3500 if chat[-1]['content'].endswith(coordination) else 0)
         run = self.root / 'run'
-        prepare(self.data, run, count, 7000, config(), with_controls=False)
+        prepare(self.data, run, count, 14000, config(), with_controls=False)
         rows = list(iter_jsonl(run/'requests.jsonl'))
+        self.assertGreater(len(rows), 3)  # the body needs more than one window
         self.assertTrue(any(r['custom_id'].endswith(':coordination') for r in rows))
         for row in rows:
-            self.assertLessEqual(count(row['body']['messages']), 7000)
+            self.assertLessEqual(count(row['body']['messages']), 14000)
 
     def test_requests_are_self_contained_runner_rows(self):
         self.prepare([self.record()])
@@ -119,8 +120,9 @@ class PipelineTests(unittest.TestCase):
             self.assertEqual(set(row), {'custom_id', 'body'})
             body = row['body']
             self.assertEqual(body['messages'], messages(cfg, w['shape'], axis, w['text']))
-            self.assertEqual(body['response_format'], {'type': 'json_schema',
-                             'json_schema': {'name': axis, 'schema': schemas()[axis]}})
+            from screening_judge.schemas import citation_schema
+            self.assertEqual(body['response_format'], {'type': 'json_schema', 'json_schema': {
+                'name': axis, 'schema': citation_schema(axis, w['evidence_chunks'])}})
             self.assertEqual((body['logprobs'], body['top_logprobs']), (True, 10))
         # The runner receives the profile only: no prompts, schemas or judge keys.
         self.assertEqual(json.loads((self.run/'engine.json').read_text()), ENGINE)
@@ -137,9 +139,14 @@ class PipelineTests(unittest.TestCase):
         from jsonschema import Draft202012Validator
         write_jsonl(self.data/'resources/sample/records.jsonl', [self.record(body='x'*600)])
         self.run = self.root/'run'
-        prepare(self.data, self.run, lambda chat: sum(len(m['content']) for m in chat), 15000,
-                {**config(), 'citation_constraints': True}, with_controls=False)
-        self.assertNotIn('citation_constraints', json.loads((self.run/'engine.json').read_text()))
+        count = lambda chat: sum(len(m['content']) for m in chat)
+        prepare(self.data, self.run, count, 15000, config(), with_controls=False)  # narrowing is the default
+        with self.assertRaisesRegex(ValueError, 'judge option'):
+            prepare(self.data, self.root/'old', count, 15000, {**config(), 'citation_constraints': True},
+                    with_controls=False)
+        prepare(self.data, self.root/'plain', count, 15000, config(), with_controls=False, citation_constraints=False)
+        plain = next(r for r in iter_jsonl(self.root/'plain/requests.jsonl') if r['custom_id'].endswith(':hacking'))
+        self.assertEqual(plain['body']['response_format']['json_schema']['schema'], schemas()['hacking'])
         w = next(iter_jsonl(self.run/'windows.jsonl'))
         sid = next(k for k, v in w['segment_kinds'].items() if v == 'BODY')
         n = len(w['evidence_chunks'][sid])
@@ -218,6 +225,32 @@ class EvidenceTests(unittest.TestCase):
                 self.assertEqual(text[c['text_start']:c['text_end']],body[c['source_start']:c['source_end']])
                 covered.update(range(c['source_start'],c['source_end']))
         self.assertEqual(covered,set(range(len(body))))
+
+    def test_every_window_carries_provenance(self):
+        def segments(provenance):
+            return [{'segment_id': 'S0', 'kind': 'ITEM', 'source': 'item', 'text': 'source: paste.example'},
+                    {'segment_id': 'S1', 'kind': 'PROVENANCE', 'source': 'records', 'text': provenance},
+                    {'segment_id': 'S2', 'kind': 'BODY', 'source': 'document:x', 'text': 'body text ' * 4000}]
+        count = lambda text: len(text)
+        short = 'observed by archive crawler at 2026-06-01'
+        parts = list(windows(segments(short), count, 6000))
+        self.assertGreater(len(parts), 5)
+        for window, _ in parts:
+            self.assertIn(short, {s['text'] for s in window if s['kind'] == 'PROVENANCE'})
+        long = '\n'.join(f'observation {i}: collected via export {i}' for i in range(400))
+        parts = list(windows(segments(long), count, 6000))
+        body = [w for w, _ in parts if any(s['kind'] == 'BODY' for s in w)]
+        self.assertGreater(len(body), 5)
+        for window in body:
+            header, = [s for s in window if s['kind'] == 'PROVENANCE_HEADER']
+            self.assertTrue(header['text'].startswith('observation 0: collected via export 0'))
+            self.assertIn('further provenance lines are in the windows of segment S1', header['text'])
+        # The full provenance is still windowed and covered: nothing is omitted.
+        covered = set()
+        for window, offsets in parts:
+            if 'S1' in offsets and any(s['segment_id'] == 'S1' for s in window):
+                covered.update(range(*offsets['S1']))
+        self.assertEqual(covered, set(range(len(long))))
 
     def test_corrupt_chunk_map_becomes_validation_failure(self):
         u=self.unit();u['source_offsets']['S0'][1] += 1
@@ -309,6 +342,55 @@ class ReportSuccessTests(unittest.TestCase):
         self.assertEqual(summary['unverified_candidates'], 0)
         self.assertEqual(summary['assessments']['agentic_activity'], {'incomplete': 1})
         self.assertEqual(summary['assessments']['coordination'], {'incomplete': 1})
+
+
+def scored(res, p_yes):
+    """Runner-style final-answer logprobs that score the label at p_yes."""
+    text = json.dumps(res)
+    cut = text.index('"label": "') + len('"label": "')
+    label = res['label']
+    rest = (1 - p_yes) / 2
+    branch = [{'token': t, 'logprob': math.log(p)} for t, p in (('yes', p_yes), ('no', rest), ('ins', rest))]
+    first = {'yes': 'yes', 'no': 'no', 'insufficient_evidence': 'ins'}[label]
+    return {'content': [{'token': text[:cut], 'logprob': 0.0, 'top_logprobs': []},
+                        {'token': first, 'logprob': -0.1, 'top_logprobs': branch},
+                        {'token': text[cut + len(first):], 'logprob': 0.0, 'top_logprobs': []}]}
+
+
+class ReviewQueueTests(unittest.TestCase):
+    setUp = PipelineTests.setUp
+    prepare = PipelineTests.prepare
+    record = PipelineTests.record
+
+    def test_queue_holds_positives_abstentions_and_failures_by_p_yes(self):
+        self.prepare([self.record()])
+        w = next(iter_jsonl(self.run/'windows.jsonl'))
+        sid = next(k for k, v in w['segment_kinds'].items() if v == 'BODY')
+        uid = lambda axis: w['window_id'] + ':' + axis
+        positive = result('hacking', 'yes')
+        positive.update(evidence=[{'segment_id': sid, 'chunk_id': 1, 'location': 'body'}],
+                        categories=['sql_injection'])
+        abstain = result('agentic_activity', 'insufficient_evidence')
+        rows = [{**answered(self.run, uid('hacking')), 'status': 'success', 'result': positive,
+                 'logprobs': scored(positive, .3)},
+                {**answered(self.run, uid('agentic_activity')), 'status': 'success', 'result': abstain,
+                 'logprobs': scored(abstain, .6)},
+                {**answered(self.run, uid('coordination')), 'status': 'failed', 'result': None,
+                 'error': 'ValueError: Nonterminal/length finish: length'}]
+        write_worker(self.run, rows)
+        parts = reconcile(self.run, [self.run/'outputs'])
+        queue = parts[7]
+        self.assertEqual([(q['axis'], q['queue_reason']) for q in queue],
+                         [('agentic_activity', 'abstention'), ('hacking', 'positive'), ('coordination', 'failure')])
+        self.assertEqual([round(q['p_yes'], 6) if q['p_yes'] is not None else None for q in queue], [.6, .3, None])
+        self.assertTrue(all('assessment' not in q for q in queue))  # no uncalibrated confidence band
+        self.assertEqual(queue[1]['findings_cyberattack'], ['SQL injection'])
+        summary = write_report(self.run/'report', *parts, None)
+        self.assertEqual(summary['review_queue'], {'positive': 1, 'abstention': 1, 'failure': 1})
+        # A negative answer is not queued.
+        rows[2].update(status='success', result=result('coordination'), error=None)
+        write_worker(self.run, rows)
+        self.assertNotIn('coordination', {q['axis'] for q in reconcile(self.run, [self.run/'outputs'])[7]})
 
 
 class WorkerMembershipTests(unittest.TestCase):

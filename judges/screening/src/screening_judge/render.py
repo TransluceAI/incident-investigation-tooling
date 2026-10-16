@@ -61,6 +61,20 @@ def validate_chunk_map(unit):
             raise ValueError("Incomplete chunk coverage: " + sid)
 
 
+def provenance_header(segment, fixed, count, limit):
+    """Leading provenance lines that fit beside the fixed context, or None."""
+    lines = segment["text"].split("\n")
+    best = None
+    for n in range(1, len(lines)):
+        note = f"[{len(lines) - n} further provenance lines are in the windows of segment {segment['segment_id']}]"
+        candidate = {**segment, "segment_id": segment["segment_id"] + "h", "kind": "PROVENANCE_HEADER",
+                     "text": "\n".join(lines[:n] + [note])}
+        if count(render_citable(fixed + [candidate])[0]) >= limit:
+            break
+        best = candidate
+    return best
+
+
 def windows(segments, count, budget, overlap=2000):
     """Yield (segments, offsets) covering every character of every segment.
 
@@ -76,6 +90,12 @@ def windows(segments, count, budget, overlap=2000):
             fixed.append(s)
         else:
             variable.append(s)
+    for s in [v for v in variable if v["kind"] == "PROVENANCE"]:
+        # Provenance too long to repeat whole is windowed like a body; every window
+        # still carries its leading lines so no body window loses its provenance.
+        header = provenance_header(s, fixed, count, budget // 3)
+        if header is not None:
+            fixed.append(header)
     for s in variable:
         start = 0
         while start < len(s["text"]) or (start == 0 and not s["text"]):

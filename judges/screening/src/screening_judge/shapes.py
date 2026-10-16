@@ -106,5 +106,6 @@ def build_segments(item: dict, bodies: list) -> list:
     return segs
 
 
-# Bulk segments are windowed; every other segment is small context repeated in each window.
-BULK_KINDS = frozenset({"BODY", "BODY_VIEW", "PROVENANCE"})
+# Bulk segments are windowed; every other segment, including PROVENANCE, is context
+# repeated in each window when it fits (render.windows).
+BULK_KINDS = frozenset({"BODY", "BODY_VIEW"})

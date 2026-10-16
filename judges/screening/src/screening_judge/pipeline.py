@@ -45,6 +45,8 @@ def main():
                    help="Resolved inference/qwen runner profile (local model path, engine and sampling)")
     a.add_argument("--label-logprobs", type=int, default=10, metavar="K",
                    help="Logprob candidates per token for label scores (0 disables; default 10)")
+    a.add_argument("--no-citation-constraints", action="store_true",
+                   help="Send the plain axis schema instead of one narrowed to each window's citable chunks")
     a.add_argument("--out", required=True)
     a.add_argument("--window-tokens", type=int, default=160_000)
     a.add_argument("--estimate-tokens", type=int, metavar="CHARS_PER_TOKEN",
@@ -77,7 +79,8 @@ def main():
         count = char_counter(args.estimate_tokens) if args.estimate_tokens is not None else tokenizer_counter(engine)
         summary = prepare(args.data_root, args.out, count, args.window_tokens, engine,
                           with_controls=not args.no_controls, shards=args.shards,
-                          benchmark_manifest=args.benchmark_manifest, label_logprobs=args.label_logprobs)
+                          benchmark_manifest=args.benchmark_manifest, label_logprobs=args.label_logprobs,
+                          citation_constraints=not args.no_citation_constraints)
         if args.estimate_tokens:
             summary["token_counts"] = f"estimated at {args.estimate_tokens} characters per token"
         print(json.dumps(summary, indent=2))
