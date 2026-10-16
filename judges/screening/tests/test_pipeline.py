@@ -201,6 +201,27 @@ class PipelineTests(unittest.TestCase):
         raw.parent.mkdir(parents=True); raw.write_text('{}')
         self.assertEqual([p for _,p in records.sources(self.data)], [deep])
 
+    def test_direct_records_use_id_when_observation_id_is_absent(self):
+        rec = self.record('page-1', 'wiki page text')
+        direct = {**{k: v for k, v in rec.items() if k != 'observation_id'}, 'id': 'page-1', 'object_id': 'obj-9'}
+        deep = self.data/'resources/wiki.example/export/DIRECT_RECORDS.jsonl'
+        deep.parent.mkdir(parents=True)
+        write_jsonl(deep, [direct, {k: v for k, v in direct.items() if k != 'id'}, direct])
+        summary = self.prepare([self.record('other', 'unrelated')])
+        observations = [o['observation_id'] for i in iter_jsonl(self.run/'items.jsonl') for o in i['observations']]
+        self.assertIn('page-1', observations)
+        gaps = [g['gap'] for g in iter_jsonl(self.run/'gaps.jsonl')]
+        self.assertEqual(sorted(gaps), ['duplicate_observation', 'unreadable_record'])  # no id; repeated id
+        self.assertEqual(summary['items'], 2)
+
+    def test_archive_ledger_kinds_from_other_sources_are_ordinary_items(self):
+        rec = self.record('redirect-1', 'Moved', kind='provider_redirect', source_url='https://short.example/x')
+        write_jsonl(self.data/'resources/urlquery.net/records.jsonl', [rec])
+        self.prepare([self.record('other', 'unrelated')])
+        items = {i['source']: i for i in iter_jsonl(self.run/'items.jsonl')}
+        self.assertEqual([o['observation_id'] for o in items['urlquery.net']['observations']], ['redirect-1'])
+        self.assertFalse(any(g.get('source') == 'urlquery.net' for g in iter_jsonl(self.run/'gaps.jsonl')))
+
     def test_empty_corpus_rejected(self):
         with self.assertRaisesRegex(ValueError, 'No .*records|empty'):
             self.prepare([])

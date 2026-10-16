@@ -11,19 +11,41 @@ THINKING = {**config(), 'sampling': {'temperature': 1.0, 'top_p': 0.95, 'top_k':
             'chat_template_kwargs': {'enable_thinking': True}}
 
 
+def window(**segments):
+    """A prepared window from {kind: text} segments, as windows.jsonl stores it."""
+    from screening_judge.render import render_citable
+    segs = [{'segment_id': f'S{i}', 'kind': kind, 'source': 'test', 'text': text}
+            for i, (kind, text) in enumerate(segments.items())]
+    text, spans, _ = render_citable(segs)
+    return {'text': text, 'segment_spans': spans, 'segment_kinds': {s['segment_id']: s['kind'] for s in segs}}
+
+
 class RuleTests(unittest.TestCase):
-    def test_rules_fire_on_their_patterns_only(self):
+    def test_rules_read_request_context_not_bodies(self):
         cases = {
-            'backend_port': ('GET http://shop.example:8089/admin', 'https://shop.example:443/ and http://a.example/'),
-            'direct_ip_host_override': ('curl https://203.0.113.7/login -H "Host: bank.example"',
-                                        'https://203.0.113.7/status with no header override'),
-            'file_version_path': ('PROPFIND /remote.php/dav/versions/alice/', 'release notes for version 2'),
-            'captcha_ocr_chain': ('fetched captcha.png then ran tesseract on it', 'a captcha on the login page'),
+            'backend_port': ('http://lib.example.edu:8089/repositories/2', 'https://a.example:443/ http://b.example/'),
+            'host_override': ("https.request({headers:{host:h},rejectUnauthorized:false,servername:h})",
+                              'https://203.0.113.7/status'),
+            'captcha_ocr_chain': ("fetch('/signup/getcaptcha').then(img => post('https://api.ocr.space/parse/image'))",
+                                  'a captcha on the login page'),
         }
         for name, (hit, miss) in cases.items():
             with self.subTest(rule=name):
-                self.assertIn(name, rules.hits(hit))
-                self.assertNotIn(name, rules.hits(miss))
+                self.assertIn(name, rules.hits(window(URL_DECODED=hit, BODY='ordinary text')))
+                self.assertIn(name, rules.hits(window(PROGRAM=hit, BODY='ordinary text')))
+                self.assertNotIn(name, rules.hits(window(URL_DECODED=miss, BODY='ordinary text')))
+                # The same text in a body is the corpus's main source of noise.
+                self.assertNotIn(name, rules.hits(window(URL='https://a.example/', BODY=hit)))
+
+    def test_cdx_lines_in_provenance_count_and_split_chains_do_not(self):
+        cdx = 'cdx: {"url": "http://lib.example.edu:8089/repositories/resources/1"}'
+        self.assertIn('backend_port', rules.hits(window(PROVENANCE=cdx, BODY='text')))
+        split = window(URL_DECODED='https://site.example/getcaptcha', PROGRAM='tesseract image.png')
+        self.assertNotIn('captcha_ocr_chain', rules.hits(split))
+
+    def test_dav_versions_is_precise_enough_to_read_everywhere(self):
+        self.assertIn('file_version_path', rules.hits(window(BODY='PROPFIND /remote.php/dav/versions/u/versions/1')))
+        self.assertEqual(rules.hits(window(BODY='release notes for version 2')), [])
 
 
 class CascadeTests(unittest.TestCase):

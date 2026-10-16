@@ -123,11 +123,18 @@ def _arquivo_items(source, recs, corpus, items, gaps):
     gaps.extend({**g, "source": source} for g in ledger.gaps)
 
 
+ARQUIVO_SOURCE = "arquivo.pt"
+
+
 def build_items(root, corpus, gaps):
     items, arquivo, seen = {}, {}, set()
     for source, path in records.sources(Path(root)):
         for line_no, rec, error in records.iter_source_records(path):
             where = {"source": source, "file": str(path.relative_to(root)), "line": line_no}
+            if (isinstance(rec, dict) and "observation_id" not in rec
+                    and isinstance(rec.get("id"), str) and rec["id"]):
+                # DIRECT_RECORDS exports name the observation `id`; duplicates still become gaps.
+                rec = {**rec, "observation_id": rec["id"]}
             if (error or not isinstance(rec, dict) or not isinstance(rec.get("observation_id"), str)
                     or not rec["observation_id"] or not isinstance(rec.get("kind"), str)
                     or (rec.get("document_path") is not None and not isinstance(rec["document_path"], str))):
@@ -137,7 +144,7 @@ def build_items(root, corpus, gaps):
                 gaps.append({**where, "gap": "duplicate_observation", "observation_id": rec["observation_id"]})
                 continue
             seen.add((source, rec["observation_id"]))
-            if rec.get("kind") in arquivo_ledger.KINDS:
+            if rec.get("kind") in arquivo_ledger.KINDS and source == ARQUIVO_SOURCE:
                 arquivo.setdefault(source, []).append(rec)
                 continue
             shape = shapes.shape_for(rec.get("kind"), source=source)
