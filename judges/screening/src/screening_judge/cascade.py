@@ -20,7 +20,7 @@ from . import rules
 from .controls import SOURCE as CONTROL_SOURCE
 from .common import atomic_write_text, iter_jsonl, sha256_file, sha256_text, write_jsonl
 from .prepare import runner_profile, write_shards
-from .report import review_queue
+from .report import queue_reason, review_queue
 
 COPIED = ("config.json", "windows.jsonl", "items.jsonl", "coverage.jsonl", "gaps.jsonl")
 POSITIVE = ("positive", "unverified_positive")
@@ -32,14 +32,6 @@ def _judgments(report, preparation_sha256):
     if any(j.get("preparation_sha256") != preparation_sha256 for j in rows.values()):
         raise ValueError("Report does not belong to this prepared run")
     return rows
-
-
-def _reason(j):
-    result = j["result"] if isinstance(j.get("result"), dict) else {}
-    label = result.get("label")
-    if j["validation_status"] != "validated":
-        return "unverified_positive" if label == "yes" and j.get("status") == "success" else "failure"
-    return {"yes": "positive", "insufficient_evidence": "abstention"}.get(label)
 
 
 def _audited(seed, uid, rate):
@@ -79,7 +71,7 @@ def escalate(run, report, out, engine_template, borderline=(0.2, 0.8), audit_rat
             if j is None:
                 continue
             reasons[uid] += [f"rule:{name}" for name in fired]
-            why = _reason(j)
+            why = queue_reason(j)
             if why:
                 reasons[uid].append(why)
             elif j.get("p_yes") is not None and lo <= j["p_yes"] <= hi:
@@ -117,7 +109,7 @@ def escalate(run, report, out, engine_template, borderline=(0.2, 0.8), audit_rat
     return summary
 
 
-def combine(pass1_report, pass2_run, pass2_report, out):
+def combine(pass1_report, pass2_run, pass2_report, out, allow_pending=False):
     pass2_run, out = Path(pass2_run), Path(out)
     preparation = json.loads((pass2_run / "preparation.json").read_text())
     if preparation.get("pass") != 2:
@@ -129,8 +121,12 @@ def combine(pass1_report, pass2_run, pass2_report, out):
     selection = {r["custom_id"]: r["reasons"] for r in iter_jsonl(pass2_run / "selection.jsonl")}
     if set(second) - set(selection):
         raise ValueError("Pass-2 report contains requests that were not selected")
+    unfinished = set(selection) - set(second)
+    if unfinished and not allow_pending:
+        # Merging now would keep pass-1 negatives that were selected for another look.
+        raise ValueError(f"Pass 2 has {len(unfinished)} pending requests; finish it or pass allow_pending")
     items = {i["item_id"]: i for i in iter_jsonl(pass2_run / "items.jsonl")}
-    final, demoted, unresolved, controls, changes = [], [], [], [], Counter()
+    final, demoted, unresolved, controls, pending, changes = [], [], [], [], [], Counter()
     audit = Counter()
     for uid, j1 in first.items():
         j2 = second.get(uid)
@@ -141,11 +137,13 @@ def combine(pass1_report, pass2_run, pass2_report, out):
                              "pass": 2 if j2 is not None and j2["validation_status"] == "validated" else 1,
                              "selection_reasons": reasons})
             continue
-        if uid in selection and j2 is None:
+        if uid in unfinished:
             changes["pass2_pending"] += 1
+            pending.append({"unit_id": uid, "item_id": j1["item_id"], "axis": j1["axis"],
+                            "selection_reasons": reasons})
         if j2 is not None and j2["validation_status"] == "validated":
-            chosen = {**j2, "pass": 2, "pass1_reason": _reason(j1)}
-            before, after = _reason(j1), _reason(j2)
+            chosen = {**j2, "pass": 2, "pass1_reason": queue_reason(j1)}
+            before, after = queue_reason(j1), queue_reason(j2)
             if before in POSITIVE and after not in POSITIVE:
                 changes["demoted"] += 1
                 demoted.append({**chosen, "pass1": j1, "selection_reasons": reasons})
@@ -155,13 +153,13 @@ def combine(pass1_report, pass2_run, pass2_report, out):
                 audit["audited"] += 1
                 audit["pass2_positive"] += after == "positive"
         else:
-            chosen = {**j1, "pass": 1}
+            chosen = {**j1, "pass": 1, **({"pass2_pending": True} if uid in unfinished else {})}
             if j2 is not None:
                 # Keep the pass-1 classification, but the failed or unverified pass-2
                 # answer (for example an uncited pass-2 yes) still goes to review.
                 changes["pass2_failed"] += 1
                 chosen["pass2_error"] = j2.get("validation_error")
-                unresolved.append({**j2, "pass": 2, "pass1_reason": _reason(j1), "selection_reasons": reasons})
+                unresolved.append({**j2, "pass": 2, "pass1_reason": queue_reason(j1), "selection_reasons": reasons})
         final.append({**chosen, "selection_reasons": reasons})
     lowered = {d["unit_id"] for d in demoted}
     queue = review_queue([j for j in final if j["unit_id"] not in lowered] + unresolved, items)
@@ -170,6 +168,7 @@ def combine(pass1_report, pass2_run, pass2_report, out):
     write_jsonl(out / "control-judgments.jsonl", controls)
     write_jsonl(out / "review-queue.jsonl", queue)
     write_jsonl(out / "demoted.jsonl", sorted(demoted, key=_pass1_rank))
+    write_jsonl(out / "pass2-pending.jsonl", pending)
     summary = {"requests": len(final), "pass2_requests": len(selection), "pass2_validated": sum(
                    j["pass"] == 2 for j in final), **dict(changes),
                "review_queue": dict(Counter(q["queue_reason"] for q in queue)), "demoted_queue": len(demoted),

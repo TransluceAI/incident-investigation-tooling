@@ -31,11 +31,17 @@ def from_body(source):
     return source.startswith("document:") or source == "body_url"
 
 
+def source_text(window, sid):
+    """A segment's source text without the [CHUNK] markers the renderer interleaves,
+    so a pattern that crosses a chunk boundary still matches."""
+    text = window["text"]
+    return "".join(text[c["text_start"]:c["text_end"]] for c in window["evidence_chunks"][sid])
+
+
 def context_segments(window):
     """Text of a prepared window's request-context segments: request URLs, their
     decodings and programs, item metadata, provenance and CDX lines."""
-    text = window["text"]
-    return [text[a:b] for sid, (a, b) in window["segment_spans"].items()
+    return [source_text(window, sid) for sid in window["evidence_chunks"]
             if window["segment_kinds"].get(sid) not in BULK_KINDS
             and not from_body(window["segment_sources"].get(sid, "document:"))]
 
@@ -48,7 +54,7 @@ def hits(window) -> list:
         found.append("backend_port")
     if any(HOST_OVERRIDE.search(segment) for segment in context):
         found.append("host_override")
-    if VERSION_PATH.search(window["text"]):
+    if any(VERSION_PATH.search(source_text(window, sid)) for sid in window["evidence_chunks"]):
         found.append("file_version_path")
     if any(CAPTCHA_ENDPOINT.search(segment) and OCR_API.search(segment) for segment in context):
         found.append("captcha_ocr_chain")

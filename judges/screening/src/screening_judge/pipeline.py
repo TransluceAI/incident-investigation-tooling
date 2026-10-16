@@ -77,6 +77,8 @@ def main():
     f.add_argument("--pass2-run", required=True)
     f.add_argument("--pass2-report", required=True)
     f.add_argument("--out", required=True)
+    f.add_argument("--allow-pending", action="store_true",
+                   help="Merge although some selected pass-2 requests are unfinished; they are listed in pass2-pending.jsonl")
     c = sub.add_parser("evaluate", help="Score item results against a labeled key")
     c.add_argument("--results", required=True)
     c.add_argument("--key", required=True)
@@ -111,7 +113,8 @@ def main():
         print(json.dumps(cascade.escalate(args.run, args.report, args.out, engine, tuple(args.borderline),
                                           args.audit_rate, args.seed, args.shards, args.allow_pending), indent=2))
     elif args.command == "cascade":
-        print(json.dumps(cascade.combine(args.pass1_report, args.pass2_run, args.pass2_report, args.out), indent=2))
+        print(json.dumps(cascade.combine(args.pass1_report, args.pass2_run, args.pass2_report, args.out,
+                                         args.allow_pending), indent=2))
     elif args.command == "evaluate":
         out = Path(args.out)
         out.mkdir(parents=True, exist_ok=True)
