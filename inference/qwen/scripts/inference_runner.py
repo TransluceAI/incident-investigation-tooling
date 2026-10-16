@@ -455,8 +455,8 @@ def earlier_attempts(row):
     return row.get('previous_attempts', [])
 
 
-def metrics_snapshot(llm):
-    if not hasattr(llm, 'get_metrics'):
+def metrics_snapshot(llm, enabled=True):
+    if not enabled or not hasattr(llm, 'get_metrics'):
         return {'available': False, 'preemptions': None, 'metrics': []}
     metrics = []
     for metric in llm.get_metrics():
@@ -512,6 +512,8 @@ def run(resources):
     config = json.loads(Path(args.config).read_text())
     enabled = thinking_enabled(config)
     resolved_engine = engine_options(config)
+    # Offline LLM defaults to disabled statistics when the option is omitted.
+    metrics_enabled = not resolved_engine.get('disable_log_stats', True)
     controls = decoding_controls(config)
     identity_data = {'config': config, 'manifest_hash': file_hash(args.fixtures),
                      'runner_hash': file_hash(__file__), 'max_records': args.max_records}
@@ -621,7 +623,7 @@ def run(resources):
         startup = {'utc': now(), 'load_seconds': time.monotonic()-started,
                    'enable_thinking': enabled, 'engine': resolved_engine,
                    'sampling': config['sampling'],
-                   'metrics': metrics_snapshot(llm)}
+                   'metrics': metrics_snapshot(llm, enabled=metrics_enabled)}
         if not legacy:
             startup['decoding_controls'] = controls
         write_json(directory / f'startup-{os.environ.get("SLURM_JOB_ID", os.getpid())}.json', startup)
@@ -706,7 +708,7 @@ def run(resources):
                 raise RuntimeError('Refusing to overwrite committed part')
             atomic_write(part, ''.join(json.dumps(r, ensure_ascii=False)+'\n' for r in results))
             done.update({r['unit_id']: slim(r) for r in results})
-            metrics = metrics_snapshot(llm)
+            metrics = metrics_snapshot(llm, enabled=metrics_enabled)
             progress = {'utc': now(), 'committed': len(done), 'expected': len(input_info),
                         'failed': sum(r['status'] != 'success' for r in done.values()),
                         'batch_units': len(batch), 'batch_seconds': time.monotonic()-begin,
@@ -728,7 +730,7 @@ def run(resources):
              'enable_thinking': enabled,
              **{k: v for k, v in token_totals(r['tokens'] for r in done.values()).items() if k != 'input_tokens'},
              'session_seconds': time.monotonic()-started,
-             'metrics': metrics_snapshot(llm) if llm else None}
+             'metrics': metrics_snapshot(llm, enabled=metrics_enabled) if llm else None}
     if controls['attempts'] > 1:
         # Committed output_tokens count final attempts only; earlier attempts are listed here.
         final['retried_units'] = sum(bool(r['retry_tokens']) for r in done.values())

@@ -430,6 +430,14 @@ class DecodingControlTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'leave room for final JSON'):
             r.check_reasoning_end(self.cfg, tokenizer)
 
+    def test_full_runner_with_disabled_statistics(self):
+        for explicit in (True, False):
+            with self.subTest(explicit=explicit):
+                self.cfg['engine']['disable_log_stats'] = True
+                if not explicit:
+                    del self.cfg['engine']['disable_log_stats']
+                self._run_retry_case()
+
     def test_full_runner_retries_before_commit_with_per_unit_controls(self):
         self._run_retry_case()
 
@@ -451,6 +459,11 @@ class DecodingControlTests(unittest.TestCase):
         class FakeLLM:
             def __init__(self, **kwargs):
                 loads.append(kwargs)
+
+            def get_metrics(self):
+                if loads[-1].get('disable_log_stats', True):
+                    raise AssertionError('Stat logging disabled')
+                return [SimpleNamespace(name='preemptions', value=0, labels={})]
 
             def chat(self, chats, **kwargs):
                 calls.append(kwargs['sampling_params'])
@@ -514,6 +527,7 @@ class DecodingControlTests(unittest.TestCase):
                 return
             rows = [json.loads(line) for line in (worker/'part-000000.jsonl').read_text().splitlines()]
             summary = json.loads((worker/'summary.json').read_text())
+            self.assertEqual(summary['metrics']['available'], not self.cfg['engine'].get('disable_log_stats', True))
         if stop_mode:
             self.assertEqual(len(calls), 1)
             self.assertEqual([row['status'] for row in rows], ['failed', 'success'])
