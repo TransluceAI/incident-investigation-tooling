@@ -26,7 +26,8 @@ def label_probabilities(logprobs):
         return None
     text = ""
     for entry in content:
-        if LABEL_KEY.search(text):
+        # The key pattern ends in a quote; skip the regex for prefixes that cannot match.
+        if text.endswith(('"', '"\n')) and LABEL_KEY.search(text):
             # Parse the prefix to ensure this is the actual top-level field,
             # rather than a quoted label-looking string inside the rationale.
             try:
