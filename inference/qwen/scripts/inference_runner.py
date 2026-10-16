@@ -633,7 +633,8 @@ def run(resources):
                         # Request rows use the batch-result shape (REQUESTS.md).
                         result = {'run_identity': identity, 'unit_id': row['unit_id'],
                                   'custom_id': row['custom_id'], 'request_sha256': row['request_sha256'],
-                                  'status': status, 'result': parsed, 'error': error,
+                                  # The rejected answer stays in content and raw_output.
+                                  'status': status, 'result': None if error else parsed, 'error': error,
                                   'content': answer_fields['final_output'],
                                   'reasoning': answer_fields['reasoning'],
                                   'reasoning_complete': answer_fields['reasoning_complete'],

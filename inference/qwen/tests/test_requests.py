@@ -175,6 +175,9 @@ class RequestRowTests(unittest.TestCase):
         self.assertEqual(''.join(c['token'] for c in content), '{"label":"yes"}')
         self.assertEqual(len(content[0]['top_logprobs']), 2)
         self.assertNotIn('logprobs', out[1])
+        # A schema-invalid answer is null in result (thinking off too); the text is kept.
+        self.assertIsNone(out[1]['result'])
+        self.assertEqual((out[1]['content'], out[1]['raw_output']), ('{"label":"yes"}', '{"label":"yes"}'))
 
 
 if __name__ == '__main__':
