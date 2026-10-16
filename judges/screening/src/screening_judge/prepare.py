@@ -301,7 +301,7 @@ def _prepare_item(item, corpus, gaps, config, count, widest, window_tokens, put_
         return 0
     if item["shape"] == "text" and bodies:
         item["shape"] = shapes.shape_for(sorted(item["kinds"])[0], bodies[0][1], source=item["source"])
-    segs = shapes.build_segments(item, bodies)
+    segs = shapes.build_segments(controls.prompt_item(item), bodies)
 
     def measure(text, shape=item["shape"]):
         return max(count(messages(config, shape, axis, text)) for axis in AXES)

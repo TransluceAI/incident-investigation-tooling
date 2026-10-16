@@ -10,7 +10,7 @@ from screening_judge.common import request_sha256, sha256_text, write_jsonl, ite
 from screening_judge.prepare import prepare
 from screening_judge.prompts import load_prompts, schemas
 from screening_judge.render import render_citable, windows, validate_chunk_map
-from screening_judge.report import reconcile, write_report
+from screening_judge.report import reconcile, review_queue, write_report
 from screening_judge.validate import validate, ValidationError
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -95,6 +95,25 @@ class PipelineTests(unittest.TestCase):
                 self.assertFalse(axis['complete'])
         self.assertEqual({g['gap'] for g in iter_jsonl(self.run/'gaps.jsonl')},
                          {'document_hash_mismatch', 'document_unreadable'})
+
+    def test_control_harness_identity_stays_out_of_model_evidence(self):
+        write_jsonl(self.data / 'resources/sample/records.jsonl', [self.record()])
+        run = self.root / 'controls'
+        prepare(self.data, run, lambda chat: sum(len(m['content']) for m in chat) // 4,
+                15000, config(), with_controls=True)
+        items = list(iter_jsonl(run / 'items.jsonl'))
+        self.assertEqual(sum(i['source'] == controls.SOURCE for i in items), len(controls.CONTROLS))
+        requests = [r for r in iter_jsonl(run / 'requests.jsonl') if r['custom_id'].startswith('control-')]
+        self.assertEqual(len(requests), 3 * len(controls.CONTROLS))
+        for request in requests:
+            content = '\n'.join(m['content'] for m in request['body']['messages'])
+            for marker in ('synthetic-control', 'synthetic_', 'observation_id=synthetic', 'time_basis: synthetic'):
+                self.assertNotIn(marker, content)
+            self.assertNotIn(request['custom_id'].split(':')[0], content)
+        sql = next(r for r in requests if r['custom_id'] == 'control-sql-url:w0:hacking')
+        self.assertIn('UNION', sql['body']['messages'][-1]['content'])
+        item = {'source': 'real-source'}
+        self.assertIs(controls.prompt_item(item), item)
 
     def test_all_axes_counted_for_window_budget(self):
         rec = self.record(body='x'*9000)
@@ -349,6 +368,15 @@ class EvidenceTests(unittest.TestCase):
         check=next(c for c in scored['checks'] if c['control']==name and c['axis']=='hacking')
         self.assertFalse(check['passed'])
 
+    def test_unrequested_controls_are_untested_not_passed(self):
+        # A pass-2 report requests only selected axes; the rest are not_requested.
+        rows=[{'item_id':'control-'+c[0],'axes':{a:{'assessment':'not_requested','injection_detected':False}
+               for a in schemas()}} for c in controls.CONTROLS]
+        scored=controls.score(rows)
+        self.assertEqual((scored['passed'], scored['total']), (0, 0))
+        self.assertEqual(scored['not_requested'], len(scored['checks']))
+        self.assertTrue(all(c['passed'] is None for c in scored['checks']))
+
     def test_scanner_preserves_payload_fields_named_hash(self):
         doc={'report_id':'a','http':[{'request':{'post_data':{'hash':'payload signal','_id':'important'}}}]}
         text, lines=scanner.view(doc)
@@ -444,14 +472,19 @@ class ReviewQueueTests(unittest.TestCase):
         self.assertEqual([q['confidence'] for q in queue], [.9, .1, None])  # model score first, missing last
         self.assertTrue(all('assessment' not in q for q in queue))
         self.assertEqual(queue[0]['findings_cyberattack'], ['SQL injection'])
-        self.assertEqual(parts[1][0]['axes']['hacking']['confidence_max'], .9)
-        # Equal confidence falls back to P(yes) from the label logprobs.
-        abstain['confidence'] = .9
+        self.assertEqual(parts[1][0]['axes']['hacking']['confidence_positive_max'], .9)
+        self.assertIsNone(parts[1][0]['axes']['agentic_activity']['confidence_positive_max'])
+        # A confident abstention (certainty in its label, not support) never outranks a positive.
+        abstain['confidence'] = .95
         rows[1]['logprobs'] = scored(abstain, .6)
         write_worker(self.run, rows)
-        tied = reconcile(self.run, [self.run/'outputs'])[7]
-        self.assertEqual([q['axis'] for q in tied], ['agentic_activity', 'hacking', 'coordination'])
-        self.assertEqual([round(q['p_yes'], 6) if q['p_yes'] is not None else None for q in tied], [.6, .3, None])
+        ordered = reconcile(self.run, [self.run/'outputs'])[7]
+        self.assertEqual([q['axis'] for q in ordered], ['hacking', 'agentic_activity', 'coordination'])
+        # Within a reason, equal confidence falls back to P(yes) from the label logprobs.
+        items = {w['item_id']: {'shape': 'capture', 'request_urls': []}}
+        tie = [{'unit_id': u, 'item_id': w['item_id'], 'axis': 'agentic_activity', 'validation_status': 'validated',
+                'result': {'label': 'yes', 'confidence': .8}, 'p_yes': p} for u, p in (('a', .3), ('b', .6))]
+        self.assertEqual([q['unit_id'] for q in review_queue(tie, items)], ['b', 'a'])
         parts = reconcile(self.run, [self.run/'outputs'])
         summary = write_report(self.run/'report', *parts, None)
         self.assertEqual(summary['review_queue'], {'positive': 1, 'abstention': 1, 'failure': 1})
@@ -459,6 +492,11 @@ class ReviewQueueTests(unittest.TestCase):
         rows[2].update(status='success', result=result('coordination'), error=None)
         write_worker(self.run, rows)
         self.assertNotIn('coordination', {q['axis'] for q in reconcile(self.run, [self.run/'outputs'])[7]})
+        # A negative with high confidence is counted as an inconsistency, not ranked.
+        rows[2]['result'] = {**result('coordination'), 'confidence': .9}
+        write_worker(self.run, rows)
+        summary = write_report(self.run/'report-neg', *reconcile(self.run, [self.run/'outputs']), None)
+        self.assertEqual(summary['confidence_on_negatives'], {'validated_no': 1, 'above_half': 1})
 
 
 class WorkerMembershipTests(unittest.TestCase):
