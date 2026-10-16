@@ -1,0 +1,778 @@
+"""Offline, resumable inference on prepared UTF-8 JSONL units. No corpus parsing.
+
+A manifest holds either text rows (config supplies the prompt and schema) or
+request rows (each carries its own messages, schema and logprob options).
+"""
+import argparse
+import contextlib
+from datetime import datetime, timezone
+import fcntl
+import functools
+import hashlib
+import json
+import math
+import os
+from pathlib import Path
+import signal
+import sys
+import time
+
+
+def digest(data):
+    return hashlib.sha256(data).hexdigest()
+
+
+def file_hash(path):
+    with open(path, 'rb') as stream:
+        return hashlib.file_digest(stream, 'sha256').hexdigest()
+
+
+def now():
+    return datetime.now(timezone.utc).isoformat()
+
+
+def atomic_write(path, text):
+    path = Path(path)
+    tmp = path.with_name(path.name + '.tmp')
+    with open(tmp, 'w', encoding='utf-8') as out:
+        out.write(text)
+        out.flush()
+        os.fsync(out.fileno())
+    os.replace(tmp, path)
+    fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def write_json(path, value):
+    atomic_write(path, json.dumps(value, ensure_ascii=False, indent=2) + '\n')
+
+
+ROLES = ('system', 'user', 'assistant')
+BODY_KEYS = {'messages', 'response_format', 'logprobs', 'top_logprobs'}
+
+
+def request_hash(body):
+    return digest(json.dumps(body, sort_keys=True, ensure_ascii=False, separators=(',', ':')).encode('utf-8'))
+
+
+def request_unit(row, idx):
+    """Normalize one request row: {"custom_id", "body": {"messages", ...}}.
+
+    The body follows the chat-completions batch shape. Sampling stays in config;
+    unknown body keys are rejected rather than silently ignored.
+    """
+    if set(row) - {'custom_id', 'body'}:
+        raise ValueError(f'Unknown request fields at row {idx}')
+    if not isinstance(row.get('custom_id'), str) or not row['custom_id']:
+        raise ValueError(f'Invalid custom_id at row {idx}')
+    body = row.get('body')
+    if not isinstance(body, dict) or set(body) - BODY_KEYS:
+        raise ValueError(f'Request body accepts {sorted(BODY_KEYS)} only: {row["custom_id"]}')
+    chat = body.get('messages')
+    if (not isinstance(chat, list) or not chat or any(
+            not isinstance(m, dict) or set(m) != {'role', 'content'} or m['role'] not in ROLES
+            or not isinstance(m['content'], str) for m in chat)):
+        raise ValueError(f'messages must be a nonempty list of {{role, content}} strings: {row["custom_id"]}')
+    response = body.get('response_format')
+    if response is not None:
+        spec = response.get('json_schema') if isinstance(response, dict) else None
+        if (not isinstance(response, dict) or set(response) != {'type', 'json_schema'}
+                or response['type'] != 'json_schema'
+                or not isinstance(spec, dict) or not isinstance(spec.get('schema'), dict)
+                or set(spec) - {'name', 'schema', 'strict'}):
+            raise ValueError(f'response_format must be {{"type": "json_schema", "json_schema": '
+                             f'{{"schema": ...}}}}: {row["custom_id"]}')
+    wants = body.get('logprobs', False)
+    top = body.get('top_logprobs')
+    if type(wants) is not bool or (top is not None and (type(top) is not int or not 0 <= top <= 20 or not wants)):
+        raise ValueError(f'logprobs must be true/false; top_logprobs (0-20) requires logprobs: {row["custom_id"]}')
+    return {'unit_id': row['custom_id'], 'custom_id': row['custom_id'], 'body': body,
+            'request_sha256': request_hash(body)}
+
+
+def fingerprint(row):
+    """Content hash that resume compares between input and committed rows."""
+    return row['request_sha256'] if 'custom_id' in row else row['text_sha256']
+
+
+def units(path, limit=None):
+    seen, mode = set(), None
+    with open(path, encoding='utf-8') as stream:
+        for idx, line in enumerate(stream):
+            if limit is not None and idx >= limit:
+                break
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError as exc:
+                raise ValueError(f'{path}:{idx + 1}: Invalid JSON: {exc.msg}') from exc
+            if not isinstance(row, dict):
+                raise ValueError(f'{path}:{idx + 1}: Expected a JSON object')
+            kind = 'request' if 'custom_id' in row else 'text'
+            if mode not in (None, kind):
+                raise ValueError(f'Manifest mixes text and request rows at row {idx}')
+            mode = kind
+            if kind == 'request':
+                row = request_unit(row, idx)
+                if row['unit_id'] in seen:
+                    raise ValueError(f'Duplicate custom_id: {row["unit_id"]}')
+                seen.add(row['unit_id'])
+                yield row
+                continue
+            if not isinstance(row.get('unit_id'), str) or not row['unit_id']:
+                raise ValueError(f'Invalid unit ID at row {idx}')
+            if row['unit_id'] in seen:
+                raise ValueError(f'Duplicate unit ID: {row["unit_id"]}')
+            seen.add(row['unit_id'])
+            if type(row.get('chunk_idx')) is not int or row['chunk_idx'] < 0:
+                raise ValueError('Invalid chunk index')
+            if not isinstance(row.get('text'), str):
+                raise ValueError('Missing text')
+            if digest(row['text'].encode('utf-8')) != row.get('text_sha256'):
+                raise ValueError(f'Text hash mismatch: {row["unit_id"]}')
+            yield row
+
+
+def committed(directory, identity):
+    """Committed units, reduced to what resume and summaries need (see slim)."""
+    rows = {}
+    for part in sorted(directory.glob('part-*.jsonl')):
+        with part.open(encoding='utf-8') as stream:
+            for line in stream:
+                row = json.loads(line)
+                if row['run_identity'] != identity:
+                    raise ValueError(f'Run mismatch: {part}')
+                if row['unit_id'] in rows:
+                    raise ValueError(f'Duplicate committed ID: {row["unit_id"]}')
+                rows[row['unit_id']] = slim(row)
+    return rows
+
+
+def slim(row):
+    """The committed row stays on disk; keep its fingerprint, status and token counts,
+    not its reasoning, raw output or logprobs, so memory does not grow with output."""
+    return {'fingerprint': fingerprint(row), 'status': row['status'], 'tokens': token_counts(row),
+            'retry_tokens': [a['output_tokens'] for a in earlier_attempts(row)]}
+
+
+def messages(row, config):
+    if 'body' in row:
+        return row['body']['messages']
+    return [{'role': 'system', 'content': config['system_prompt']},
+            {'role': 'user', 'content': '<document>\n' + row['text'] + '\n</document>'}]
+
+
+def row_schema(row, config):
+    """The request's own schema, else the configured one."""
+    response = (row or {}).get('body', {}).get('response_format')
+    if response is not None:
+        return response['json_schema']['schema']
+    if 'schema' not in config:
+        raise ValueError(f'No response_format and no config schema: {row["unit_id"]}')
+    return config['schema']
+
+
+def top_logprobs(row):
+    """Candidates per generated token requested by a row, or None."""
+    body = (row or {}).get('body', {})
+    return body.get('top_logprobs', 0) if body.get('logprobs') else None
+
+
+def final_logprobs(answer, start, special_ids=()):
+    """Chat-completions style logprobs for the final answer tokens (after reasoning).
+
+    Each entry gives the sampled token and every candidate the engine returned
+    (top-k plus the sampled token). Missing or non-finite values become null;
+    nothing is inferred. Missing or misaligned tables are an engine error.
+    Trailing special tokens (including EOS) are not part of answer text.
+    """
+    tables = getattr(answer, 'logprobs', None)
+    ids = list(answer.token_ids)
+    if not tables or len(tables) != len(ids):
+        raise ValueError('Missing or misaligned generated-token logprobs')
+    end = len(ids)
+    while end > start and ids[end - 1] in special_ids:
+        end -= 1
+
+    def value(lp):
+        return lp if isinstance(lp, (int, float)) and math.isfinite(lp) else None
+
+    content = []
+    for token_id, table in zip(ids[start:end], tables[start:end]):
+        table = table or {}
+        chosen = table.get(token_id)
+        def order(candidate):
+            rank, lp = getattr(candidate, 'rank', None), value(candidate.logprob)
+            return (rank is None, rank or 0, math.inf if lp is None else -lp)
+
+        ranked = sorted(table.values(), key=order)
+        content.append({'token': getattr(chosen, 'decoded_token', None),
+                        'logprob': value(chosen.logprob) if chosen is not None else None,
+                        'top_logprobs': [{'token': c.decoded_token, 'logprob': value(c.logprob)}
+                                         for c in ranked]})
+    return {'content': content}
+
+
+def thinking_enabled(config):
+    # Qwen templates can default to thinking; parsing and generation must agree.
+    enabled = config.get('chat_template_kwargs', {}).get('enable_thinking')
+    if type(enabled) is not bool:
+        raise ValueError('chat_template_kwargs.enable_thinking must be true or false')
+    return enabled
+
+
+def engine_options(config):
+    """Resolve the JSON grammar gate without changing saved application settings."""
+    options = dict(config['engine'])
+    for key in ('tensor_parallel_size', 'pipeline_parallel_size', 'data_parallel_size'):
+        if key in options and (type(options[key]) is not int or options[key] != 1):
+            raise ValueError(f'{key} must be 1 for this one-GPU-per-worker launcher')
+    if thinking_enabled(config):
+        structured = dict(options.get('structured_outputs_config') or {})
+        for value in (options.get('reasoning_parser'), structured.get('reasoning_parser')):
+            if value not in (None, '', 'qwen3'):
+                raise ValueError('Thinking currently supports the Qwen3 parser only')
+        if structured.get('enable_in_reasoning', False) is not False:
+            raise ValueError('JSON constraints must not apply inside reasoning')
+        structured.update(reasoning_parser='qwen3', enable_in_reasoning=False)
+        options['structured_outputs_config'] = structured
+    reasoning = options.get('reasoning_config')
+    if reasoning is not None:
+        # Needed only for sampling.thinking_token_budget; kept as JSON here and
+        # converted to vLLM's ReasoningConfig when the engine is built.
+        if not thinking_enabled(config):
+            raise ValueError('engine.reasoning_config requires enable_thinking')
+        if not isinstance(reasoning, dict) or set(reasoning) - {'reasoning_parser', 'reasoning_end_str'}:
+            raise ValueError('engine.reasoning_config accepts reasoning_parser and reasoning_end_str only')
+        if reasoning.get('reasoning_parser') not in (None, '', 'qwen3'):
+            raise ValueError('Thinking currently supports the Qwen3 parser only')
+        options['reasoning_config'] = {**reasoning, 'reasoning_parser': 'qwen3'}
+    return options
+
+
+def decoding_controls(config):
+    """Validate the opt-in decoding controls; absent keys keep legacy behaviour."""
+    sampling = config['sampling']
+    if type(sampling.get('n', 1)) is not int or sampling.get('n', 1) != 1:
+        raise ValueError('The runner requires sampling.n=1; multiple outputs cannot be committed per unit')
+    repetition = sampling.get('repetition_detection')
+    if repetition is not None and (
+            not isinstance(repetition, dict) or not repetition
+            or set(repetition) - {'max_pattern_size', 'min_pattern_size', 'min_count'}
+            or any(type(v) is not int for v in repetition.values())):
+        raise ValueError('repetition_detection takes integer max_pattern_size, min_pattern_size and min_count')
+    if repetition is not None:
+        low, high, count = (repetition.get(k, 0) for k in ('min_pattern_size', 'max_pattern_size', 'min_count'))
+        if low < 0 or high < 0 or low > high or (high > 0 and count < 2):
+            raise ValueError('Invalid repetition_detection bounds: require 0 <= min_pattern_size <= max_pattern_size'
+                             ' and min_count >= 2 when enabled')
+    budget = sampling.get('thinking_token_budget')
+    if budget is not None:
+        if not thinking_enabled(config):
+            raise ValueError('thinking_token_budget requires enable_thinking')
+        if type(budget) is not int or not 0 < budget < sampling['max_tokens']:
+            raise ValueError('thinking_token_budget must be a positive integer below max_tokens')
+        if 'reasoning_config' not in config['engine']:
+            raise ValueError('thinking_token_budget requires engine.reasoning_config')
+    retry = config.get('retry')
+    if retry is not None and (not isinstance(retry, dict) or 'max_attempts' not in retry
+                              or set(retry) - {'max_attempts', 'temperatures'}
+                              or type(retry['max_attempts']) is not int or retry['max_attempts'] < 1):
+        raise ValueError('retry must be {"max_attempts": <positive integer>, "temperatures": [...]?}')
+    temperatures = (retry or {}).get('temperatures')
+    if temperatures is not None and (
+            not isinstance(temperatures, list) or len(temperatures) != retry['max_attempts'] - 1
+            or any(type(t) not in (int, float) or not 0 <= t <= 2 for t in temperatures)):
+        raise ValueError('retry.temperatures needs one temperature (0-2) per retry: max_attempts - 1 values')
+    return {'attempts': retry['max_attempts'] if retry else 1, 'budget': budget,
+            'temperatures': temperatures}
+
+
+def check_reasoning_end(config, tokenizer):
+    """The forced end string must close reasoning with exactly one </think>.
+
+    The JSON grammar starts after </think>, so nothing may follow it.
+    """
+    budget = config['sampling'].get('thinking_token_budget')
+    end_str = (config['engine'].get('reasoning_config') or {}).get('reasoning_end_str')
+    if budget is not None and not end_str:
+        end_str = '</think>'  # qwen3 parser default in the supported vLLM version
+    if end_str:
+        ids = tokenizer.encode(end_str, add_special_tokens=False)
+        end = thinking_tokens(tokenizer)[1]
+        if ids.count(end) != 1 or ids[-1] != end:
+            raise ValueError('reasoning_end_str must end with a single </think> token')
+        if budget is not None and budget + len(ids) >= config['sampling']['max_tokens']:
+            raise ValueError('thinking_token_budget plus reasoning_end_str must leave room for final JSON')
+
+
+def thinking_tokens(tokenizer):
+    start, end = tokenizer.convert_tokens_to_ids(['<think>', '</think>'])
+    unknown = getattr(tokenizer, 'unk_token_id', None)
+    if start is None or end is None or unknown in (start, end):
+        raise ValueError('Thinking requires Qwen <think>/</think> tokens')
+    if start == end:
+        raise ValueError('Reasoning boundary tokens must be distinct')
+    return start, end
+
+
+def split_answer(answer, tokenizer, enabled):
+    """Split Qwen offline output by token boundary, not JSON-looking reasoning.
+
+    The prompt already opens <think>. Offline output may hide special tokens in
+    answer.text, so use generated IDs. Counts include generated delimiters/EOS
+    and add up exactly to output_tokens. Never recover JSON from an unfinished
+    reasoning block.
+    """
+    ids = list(answer.token_ids)
+    if not enabled:
+        return {'reasoning': None, 'final_output': answer.text,
+                'reasoning_tokens': 0, 'final_tokens': len(ids),
+                'reasoning_complete': None}
+    start, end = thinking_tokens(tokenizer)
+    if end not in ids:
+        return {'reasoning': tokenizer.decode(ids, skip_special_tokens=True),
+                'final_output': '', 'reasoning_tokens': len(ids),
+                'final_tokens': 0, 'reasoning_complete': False}
+    boundary = ids.index(end)
+    # Permit a generated opener only at the start; never accept multiple blocks.
+    if any(token == start and i != 0 for i, token in enumerate(ids[:boundary])):
+        raise ValueError('Unexpected nested reasoning block')
+    if any(token in (start, end) for token in ids[boundary + 1:]):
+        raise ValueError('Unexpected reasoning boundary in final answer')
+    return {'reasoning': tokenizer.decode(ids[:boundary], skip_special_tokens=True),
+            'final_output': tokenizer.decode(ids[boundary + 1:], skip_special_tokens=True),
+            'reasoning_tokens': boundary + 1, 'final_tokens': len(ids) - boundary - 1,
+            'reasoning_complete': True}
+
+
+TRUNCATION = ('Nonterminal/length finish', 'Reasoning ended without </think>')
+
+
+class Failure(str):
+    """Error text that also says whether it is a format failure (retryable)."""
+    retryable = False
+
+
+def failure(exc):
+    text = Failure(f'{type(exc).__name__}: {exc}')
+    # Invalid JSON, schema violations and truncation are format failures. Engine or
+    # template mismatches and reasoning-boundary anomalies are not retried.
+    text.retryable = (isinstance(exc, json.JSONDecodeError) or type(exc).__name__ == 'ValidationError'
+                      or str(exc).startswith(TRUNCATION))
+    return text
+
+
+def validate_answer(answer, prompt_ids, expected_tokens, tokenizer, validator, enabled):
+    parsed = None
+    fields = {'reasoning': None, 'final_output': None, 'reasoning_tokens': None,
+              'final_tokens': None, 'reasoning_complete': None}
+    try:
+        fields = split_answer(answer, tokenizer, enabled)
+        if answer.finish_reason != 'stop':
+            raise ValueError(f'Nonterminal/length finish: {answer.finish_reason}')
+        if len(prompt_ids) != expected_tokens:
+            raise ValueError('Rendered token count differs from engine input')
+        # Boundary-looking strings inside valid JSON are ordinary application data.
+        if not enabled and answer.text.lstrip().startswith('<think>'):
+            raise ValueError('Unexpected reasoning preamble')
+        if enabled and not fields['reasoning_complete']:
+            raise ValueError('Reasoning ended without </think>; final JSON unavailable')
+        parsed = json.loads(fields['final_output'])
+        validator.validate(parsed)
+    except Exception as exc:
+        # Legacy failures retain parsed JSON for inspection; status stays failed.
+        return parsed if not enabled else None, failure(exc), fields
+    return parsed, None, fields
+
+
+def budget_exhausted(answer, fields, budget, end_ids, start):
+    """True when vLLM forced the closing string after a full reasoning budget.
+
+    reasoning_tokens counts the closing </think> (and a generated opener), so a
+    natural stop on the last budgeted token is not a cap. A bare '</think>' end
+    string cannot be told apart from such a natural stop.
+    """
+    n = fields['reasoning_tokens']
+    if not fields['reasoning_complete'] or not n:
+        return False
+    ids = list(answer.token_ids)[:n]
+    opener = 1 if ids[0] == start else 0
+    return ids[-len(end_ids):] == end_ids and n - opener - len(end_ids) >= budget
+
+
+def batches(rows, tokenizer, config, skip):
+    batch, count = [], 0
+    for row in rows:
+        if row['unit_id'] in skip:
+            continue
+        chat = messages(row, config)
+        ids = tokenizer.apply_chat_template(chat, tokenize=True, return_dict=False, add_generation_prompt=True,
+                                            **config['chat_template_kwargs'])
+        if not isinstance(ids, list) or any(not isinstance(token, int) for token in ids):
+            raise TypeError('Expected a flat list of token IDs from the chat template')
+        if thinking_enabled(config):
+            start, end = thinking_tokens(tokenizer)
+            last_start = max((i for i, token in enumerate(ids) if token == start), default=-1)
+            last_end = max((i for i, token in enumerate(ids) if token == end), default=-1)
+            if last_start <= last_end:
+                raise ValueError('Thinking template must leave an open <think> block')
+        tokens = len(ids)
+        if tokens + config['sampling']['max_tokens'] > config['engine']['max_model_len']:
+            raise ValueError(f'Oversize unit {row["unit_id"]}: {tokens} prompt tokens')
+        if tokens > config['host_batch_tokens']:
+            raise ValueError('Single unit exceeds configured host batch token cap')
+        if batch and (len(batch) >= config['host_batch_records'] or
+                      count + tokens > config['host_batch_tokens']):
+            yield batch
+            batch, count = [], 0
+        batch.append((row, chat, tokens))
+        count += tokens
+    if batch:
+        yield batch
+
+
+def token_counts(row):
+    """(input, output, reasoning, final) tokens for a text or request result row."""
+    if 'usage' in row:
+        u = row['usage']
+        return u['prompt_tokens'], u['completion_tokens'], u['reasoning_tokens'], u['final_tokens']
+    return row['input_tokens'], row['output_tokens'], row['reasoning_tokens'], row['final_tokens']
+
+
+def token_totals(counts):
+    """Totals over (input, output, reasoning, final) token tuples from token_counts."""
+    counts = list(counts)
+    return {'input_tokens': sum(c[0] for c in counts), 'output_tokens': sum(c[1] for c in counts),
+            'reasoning_tokens': sum(c[2] or 0 for c in counts), 'final_tokens': sum(c[3] or 0 for c in counts),
+            'unclassified_tokens': sum(c[1] for c in counts if c[2] is None)}
+
+
+def earlier_attempts(row):
+    """Attempts before the committed one (retries only)."""
+    if 'attempts' in row:
+        return row['attempts'][:-1]
+    return row.get('previous_attempts', [])
+
+
+def metrics_snapshot(llm, enabled=True):
+    if not enabled:
+        return {'available': False, 'preemptions': None, 'metrics': []}
+    metrics = []
+    for metric in llm.get_metrics():
+        name = getattr(metric, 'name', type(metric).__name__)
+        value = getattr(metric, 'value', None)
+        if isinstance(value, (int, float)):
+            metrics.append({'name': name, 'value': value, 'labels': getattr(metric, 'labels', {})})
+    preempt = [m['value'] for m in metrics if 'preempt' in m['name']]
+    return {'available': True, 'preemptions': sum(preempt) if preempt else None, 'metrics': metrics}
+
+
+def job_deadline(stop_at):
+    """Earlier of the caller's absolute cutoff and the allocated Slurm end time."""
+    deadline = float('inf')
+    if stop_at:
+        try:
+            stop = datetime.fromisoformat(stop_at.replace('Z', '+00:00'))
+        except ValueError:
+            raise ValueError('--stop-at must be an ISO 8601 timestamp') from None
+        if stop.tzinfo is None:
+            raise ValueError('--stop-at must include its timezone')
+        deadline = stop.timestamp()
+    slurm_end = os.environ.get('SLURM_JOB_END_TIME')
+    if slurm_end:
+        deadline = min(deadline, int(slurm_end))
+    return deadline
+
+
+def run(resources):
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--config', required=True)
+    parser.add_argument('--fixtures', '--input-manifest', dest='fixtures', required=True)
+    parser.add_argument('--output-dir', required=True)
+    parser.add_argument('--worker-id', type=int, required=True)
+    parser.add_argument('--stop-at', help='Optional ISO 8601 deadline with timezone')
+    parser.add_argument('--drain-seconds', type=int, default=900,
+                        help='Minimum drain margin before the deadline, increased by observed batch time (default: 900 seconds)')
+    parser.add_argument('--max-records', type=int)
+    parser.add_argument('--resume', action='store_true')
+    parser.add_argument('--validate-only', action='store_true')
+    args = parser.parse_args()
+    if args.worker_id < 0 or (args.max_records is not None and args.max_records < 1):
+        parser.error('worker-id must be nonnegative and max-records positive')
+    if args.drain_seconds < 0:
+        parser.error('--drain-seconds must be nonnegative')
+    try:
+        deadline = job_deadline(args.stop_at)
+    except ValueError as exc:
+        parser.error(str(exc))
+    if time.time() >= deadline:
+        raise RuntimeError('Deadline has passed')
+    config = json.loads(Path(args.config).read_text())
+    enabled = thinking_enabled(config)
+    resolved_engine = engine_options(config)
+    # Offline LLM defaults to disabled statistics when the option is omitted.
+    metrics_enabled = not resolved_engine.get('disable_log_stats', True)
+    controls = decoding_controls(config)
+    identity_data = {'config': config, 'manifest_hash': file_hash(args.fixtures),
+                     'runner_hash': file_hash(__file__), 'max_records': args.max_records}
+    identity = digest(json.dumps(identity_data, sort_keys=True).encode())
+    directory = Path(args.output_dir) / f'worker-{args.worker_id}'
+    directory.mkdir(parents=True, exist_ok=True)
+    from transformers import AutoTokenizer
+    from jsonschema import Draft202012Validator
+
+    @functools.lru_cache(maxsize=4096)
+    def compiled(key):
+        schema = json.loads(key)
+        Draft202012Validator.check_schema(schema)
+        return Draft202012Validator(schema)
+
+    def validator_for(row):
+        # Requests may share or differ in schema; recently used ones stay compiled,
+        # bounded so per-window schemas cannot grow the cache with the manifest.
+        return compiled(json.dumps(row_schema(row, config), sort_keys=True))
+
+    if 'schema' in config:
+        validator_for(None)
+    tokenizer = AutoTokenizer.from_pretrained(config['model'], local_files_only=True,
+                                              trust_remote_code=False)
+    # Validate every selected unit before instantiating a GPU model.
+    check_reasoning_end(config, tokenizer)
+    end_ids = start_id = None
+    if controls['budget'] is not None:
+        end_str = (config['engine'].get('reasoning_config') or {}).get('reasoning_end_str') or '</think>'
+        end_ids = tokenizer.encode(end_str, add_special_tokens=False)
+        start_id = thinking_tokens(tokenizer)[0]
+    input_info, per_unit = {}, False
+    for r in units(args.fixtures, args.max_records):
+        input_info[r['unit_id']] = fingerprint(r)
+        per_unit = 'body' in r  # units() guarantees one row kind per manifest
+    legacy = not per_unit and controls['attempts'] == 1
+    for batch in batches(units(args.fixtures, args.max_records), tokenizer, config, {}):
+        for row, _, _ in batch:
+            validator_for(row)
+    if args.validate_only:
+        print(json.dumps({'event': 'validated', 'units': len(input_info), 'identity': identity}), flush=True)
+        return
+    lock = resources.enter_context(open(directory / '.writer.lock', 'a'))
+    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    identity_path = directory / 'identity.json'
+    if identity_path.exists():
+        if not args.resume or json.loads(identity_path.read_text())['identity'] != identity:
+            raise ValueError('Existing output requires --resume with matching identity')
+    else:
+        if list(directory.glob('part-*.jsonl')):
+            raise ValueError('Parts exist without identity')
+        write_json(identity_path, {'identity': identity, **identity_data})
+    done = committed(directory, identity)
+    if not set(done).issubset(input_info):
+        raise ValueError('Committed IDs outside selected manifest')
+    for key, row in done.items():
+        if row['fingerprint'] != input_info[key]:
+            raise ValueError('Committed/input hash mismatch')
+    longest_batch_seconds = 0
+    with contextlib.suppress(FileNotFoundError):
+        for line in (directory / 'timings.jsonl').read_text().splitlines():
+            with contextlib.suppress(ValueError):  # a torn last line after a crash
+                longest_batch_seconds = max(longest_batch_seconds, json.loads(line)['batch_seconds'])
+    stopping = False
+
+    def drain_at():
+        return deadline - max(args.drain_seconds, 2 * longest_batch_seconds)
+
+    def stop(signum, frame):
+        nonlocal stopping
+        stopping = True
+        # print() raises a reentrancy error if the signal lands inside a buffered
+        # write; an unbuffered write on the stdout descriptor is safe here.
+        line = (json.dumps({'event': 'stop_requested', 'signal': signum}) + '\n').encode()
+        with contextlib.suppress(OSError, ValueError):
+            os.write(sys.stdout.fileno(), line)
+
+    signal.signal(signal.SIGTERM, stop)
+    signal.signal(signal.SIGINT, stop)
+    started = time.monotonic()
+    llm = None
+    if len(done) < len(input_info) and not stopping and time.time() < drain_at():
+        from vllm import LLM, SamplingParams
+        from vllm.sampling_params import StructuredOutputsParams
+        import torch
+        cuda_count = torch.cuda.device_count()
+        if cuda_count != 1:
+            raise RuntimeError('Expected exactly one Slurm-allocated CUDA device')
+        print(json.dumps({'event': 'loading', 'utc': now(), 'worker': args.worker_id,
+                          'job_id': os.environ.get('SLURM_JOB_ID'),
+                          'cuda_visible_devices': os.environ.get('CUDA_VISIBLE_DEVICES'),
+                          'cuda_count': cuda_count,
+                          'gpu': torch.cuda.get_device_name(0),
+                          'torch': torch.__version__, 'cuda_runtime': torch.version.cuda,
+                          'identity': identity}), flush=True)
+        engine_kwargs = dict(resolved_engine)
+        if 'reasoning_config' in engine_kwargs:
+            from vllm.config.reasoning import ReasoningConfig
+            engine_kwargs['reasoning_config'] = ReasoningConfig(**engine_kwargs['reasoning_config'])
+        llm = LLM(model=config['model'], tokenizer=config['model'], **engine_kwargs)
+        base_sampling = dict(config['sampling'])
+        if 'repetition_detection' in base_sampling:
+            from vllm.sampling_params import RepetitionDetectionParams
+            base_sampling['repetition_detection'] = RepetitionDetectionParams(**base_sampling['repetition_detection'])
+
+        def sampling_for(row, attempt):
+            kwargs = dict(base_sampling)
+            # A retry with an explicit sampling seed draws a new sample, and an optional
+            # schedule raises the temperature per retry (olmOCR-style): greedy retries
+            # may repeat the same answer, so recovery is not guaranteed.
+            if attempt > 1 and type(kwargs.get('seed')) is int:
+                kwargs['seed'] += attempt - 1
+            if attempt > 1 and controls['temperatures']:
+                kwargs['temperature'] = controls['temperatures'][attempt - 2]
+            schema = row_schema(row, config)
+            k = top_logprobs(row)
+            if k is not None:
+                kwargs['logprobs'] = k
+            return SamplingParams(**kwargs, structured_outputs=StructuredOutputsParams(json=schema))
+
+        sampling = sampling_for(None, 1) if not per_unit else None
+        startup = {'utc': now(), 'load_seconds': time.monotonic()-started,
+                   'enable_thinking': enabled, 'engine': resolved_engine,
+                   'sampling': config['sampling'],
+                   'metrics': metrics_snapshot(llm, enabled=metrics_enabled)}
+        if not legacy:
+            startup['decoding_controls'] = controls
+        write_json(directory / f'startup-{os.environ.get("SLURM_JOB_ID", os.getpid())}.json', startup)
+        for batch in batches(units(args.fixtures, args.max_records), tokenizer, config, done):
+            if stopping or time.time() >= drain_at():
+                break
+            begin = time.monotonic()
+            print(json.dumps({'event': 'batch_start', 'utc': now(), 'committed': len(done),
+                              'units': len(batch), 'prompt_tokens': sum(b[2] for b in batch)}), flush=True)
+            # Model-output failures are re-run within the batch, before commit, so
+            # resume semantics are unchanged: committed rows are never retried.
+            results, pending, history = [None] * len(batch), list(range(len(batch))), {}
+            for attempt in range(1, controls['attempts'] + 1):
+                # Finish committing the completed attempt rather than start more
+                # GPU work after a stop request or deadline.
+                if attempt > 1 and (stopping or time.time() >= drain_at()):
+                    break
+                params = sampling if legacy else [
+                    sampling if sampling is not None and attempt == 1 else sampling_for(batch[i][0], attempt)
+                    for i in pending]
+                attempt_started = time.monotonic()
+                outputs = llm.chat([batch[i][1] for i in pending], sampling_params=params,
+                                   chat_template_kwargs=config['chat_template_kwargs'], use_tqdm=False)
+                longest_batch_seconds = max(longest_batch_seconds, time.monotonic() - attempt_started)
+                if len(outputs) != len(pending):
+                    raise RuntimeError('Missing model outputs; batch not committed')
+                retry = []
+                for i, output in zip(pending, outputs):
+                    row, chat, count = batch[i]
+                    if len(output.outputs) != 1:
+                        raise RuntimeError('Expected exactly one model output per unit; batch not committed')
+                    answer = output.outputs[0]
+                    if answer.finish_reason not in ('stop', 'length', 'repetition'):
+                        raise RuntimeError(f'Engine terminated generation ({answer.finish_reason}); '
+                                           'batch not committed, resume to regenerate it')
+                    parsed, error, answer_fields = validate_answer(
+                        answer, output.prompt_token_ids, count, tokenizer, validator_for(row), enabled)
+                    logprobs = None
+                    if not error and top_logprobs(row) is not None:
+                        try:
+                            logprobs = final_logprobs(answer, answer_fields['reasoning_tokens'] or 0,
+                                                     getattr(tokenizer, 'all_special_ids', ()))
+                        except ValueError as exc:
+                            parsed, error = None, failure(exc)
+                    status = 'failed' if error else 'success'
+                    if 'body' in row:
+                        # Request rows use the batch-result shape (README.md#result-rows).
+                        result = {'run_identity': identity, 'unit_id': row['unit_id'],
+                                  'custom_id': row['custom_id'], 'request_sha256': row['request_sha256'],
+                                  # The rejected answer stays in content and raw_output.
+                                  'status': status, 'result': None if error else parsed, 'error': error,
+                                  'content': answer_fields['final_output'],
+                                  'reasoning': answer_fields['reasoning'],
+                                  'reasoning_complete': answer_fields['reasoning_complete'],
+                                  'finish_reason': answer.finish_reason,
+                                  'usage': {'prompt_tokens': count, 'completion_tokens': len(answer.token_ids),
+                                            'reasoning_tokens': answer_fields['reasoning_tokens'],
+                                            'final_tokens': answer_fields['final_tokens']},
+                                  'raw_output': answer.text, 'utc': now()}
+                    else:
+                        result = {'run_identity': identity, 'unit_id': row['unit_id'],
+                                  'text_sha256': row['text_sha256'], 'chunk_idx': row['chunk_idx'],
+                                  'status': status, 'result': parsed,
+                                  'error': error, 'raw_output': answer.text,
+                                  **answer_fields,
+                                  'input_tokens': count, 'output_tokens': len(answer.token_ids),
+                                  'finish_reason': answer.finish_reason, 'utc': now()}
+                    if top_logprobs(row) is not None:
+                        result['logprobs'] = logprobs
+                    if controls['budget'] is not None:
+                        result['thinking_budget_exhausted'] = budget_exhausted(
+                            answer, answer_fields, controls['budget'], end_ids, start_id)
+                    if 'body' in row:
+                        # Every attempt, the committed one last.
+                        result['attempts'] = list(history.get(i, ())) + [{
+                            'attempt': attempt, 'error': error, 'finish_reason': answer.finish_reason,
+                            'output_tokens': len(answer.token_ids)}]
+                    elif controls['attempts'] > 1:
+                        result['attempt'] = attempt
+                        result['previous_attempts'] = list(history.get(i, ()))
+                    results[i] = result
+                    if error and error.retryable and attempt < controls['attempts']:
+                        history.setdefault(i, []).append({'attempt': attempt, 'error': error,
+                                                          'finish_reason': answer.finish_reason,
+                                                          'output_tokens': len(answer.token_ids),
+                                                          'raw_output': answer.text})
+                        retry.append(i)
+                pending = retry
+                if not pending:
+                    break
+            part = directory / f'part-{len(list(directory.glob("part-*.jsonl"))):06d}.jsonl'
+            if part.exists():
+                raise RuntimeError('Refusing to overwrite committed part')
+            atomic_write(part, ''.join(json.dumps(r, ensure_ascii=False)+'\n' for r in results))
+            done.update({r['unit_id']: slim(r) for r in results})
+            metrics = metrics_snapshot(llm, enabled=metrics_enabled)
+            progress = {'utc': now(), 'committed': len(done), 'expected': len(input_info),
+                        'failed': sum(r['status'] != 'success' for r in done.values()),
+                        'batch_units': len(batch), 'batch_seconds': time.monotonic()-begin,
+                        **{f'batch_{k}': v for k, v in token_totals(map(token_counts, results)).items()},
+                        'metrics': metrics}
+            if controls['attempts'] > 1:
+                progress['batch_retried_units'] = sum(bool(earlier_attempts(r)) for r in results)
+                progress['batch_retry_output_tokens'] = sum(a['output_tokens'] for r in results
+                                                            for a in earlier_attempts(r))
+            longest_batch_seconds = max(longest_batch_seconds, progress['batch_seconds'])
+            progress['longest_batch_seconds'] = longest_batch_seconds
+            with open(directory / 'timings.jsonl', 'a') as stream:
+                stream.write(json.dumps(progress)+'\n')
+                stream.flush()
+                os.fsync(stream.fileno())
+            print(json.dumps({'event': 'batch_committed', **progress}), flush=True)
+    final = {'utc': now(), 'identity': identity, 'expected': len(input_info),
+             'committed': len(done), 'unfinished': len(input_info)-len(done),
+             'failed': sum(r['status'] != 'success' for r in done.values()),
+             'enable_thinking': enabled,
+             **{k: v for k, v in token_totals(r['tokens'] for r in done.values()).items() if k != 'input_tokens'},
+             'session_seconds': time.monotonic()-started,
+             'metrics': metrics_snapshot(llm, enabled=metrics_enabled) if llm else None}
+    if controls['attempts'] > 1:
+        # Committed output_tokens count final attempts only; earlier attempts are listed here.
+        final['retried_units'] = sum(bool(r['retry_tokens']) for r in done.values())
+        final['retry_output_tokens'] = sum(sum(r['retry_tokens']) for r in done.values())
+    write_json(directory / 'summary.json', final)
+    print(json.dumps({'event': 'finished', **final}), flush=True)
+    if final['unfinished'] or final['failed']:
+        raise SystemExit(2)
+
+
+def main():
+    with contextlib.ExitStack() as resources:
+        run(resources)
+
+
+if __name__ == '__main__':
+    main()
