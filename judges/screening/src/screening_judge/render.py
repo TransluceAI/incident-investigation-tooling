@@ -62,17 +62,41 @@ def validate_chunk_map(unit):
 
 
 def provenance_header(segment, fixed, count, limit):
-    """Leading provenance lines that fit beside the fixed context, or None."""
-    lines = segment["text"].split("\n")
+    """Leading provenance that fits beside the fixed context.
+
+    Whole lines when they fit, otherwise a character prefix of the first line.
+    Raises when not even a short prefix fits, rather than leaving body windows
+    without provenance.
+    """
+    sid, text = segment["segment_id"], segment["text"]
+    lines = text.split("\n")
+
+    def header(body):
+        return {**segment, "segment_id": sid + "h", "kind": "PROVENANCE_HEADER", "text": body}
+
+    def fits(candidate):
+        return count(render_citable(fixed + [candidate])[0]) < limit
+
     best = None
     for n in range(1, len(lines)):
-        note = f"[{len(lines) - n} further provenance lines are in the windows of segment {segment['segment_id']}]"
-        candidate = {**segment, "segment_id": segment["segment_id"] + "h", "kind": "PROVENANCE_HEADER",
-                     "text": "\n".join(lines[:n] + [note])}
-        if count(render_citable(fixed + [candidate])[0]) >= limit:
+        candidate = header("\n".join(lines[:n] + [
+            f"[{len(lines) - n} further provenance lines are in the windows of segment {sid}]"]))
+        if not fits(candidate):
             break
         best = candidate
-    return best
+    if best is not None:
+        return best
+    note = f"\n[provenance continues in the windows of segment {sid}]"
+    lo, hi = 0, len(lines[0])  # longest first-line prefix that fits
+    while lo < hi:
+        mid = (lo + hi + 1) // 2
+        if fits(header(lines[0][:mid] + note)):
+            lo = mid
+        else:
+            hi = mid - 1
+    if not lo:
+        raise ValueError("No provenance prefix fits the window budget; refusing windows without provenance")
+    return header(lines[0][:lo] + note)
 
 
 def windows(segments, count, budget, overlap=2000):
@@ -84,18 +108,20 @@ def windows(segments, count, budget, overlap=2000):
     if count(full) <= budget:
         yield segments, {s["segment_id"]: [0, len(s["text"])] for s in segments}
         return
+    # count() includes the prompt around the evidence, so repeated context gets a
+    # third of the room left after that overhead, not a third of the whole budget.
+    overhead = count(render_citable([])[0])
+    limit = overhead + max(budget - overhead, 0) // 3
     fixed, variable = [], []
     for s in segments:
-        if s["kind"] not in BULK_KINDS and count(render_citable(fixed + [s])[0]) < budget // 3:
+        if s["kind"] not in BULK_KINDS and count(render_citable(fixed + [s])[0]) < limit:
             fixed.append(s)
         else:
             variable.append(s)
     for s in [v for v in variable if v["kind"] == "PROVENANCE"]:
         # Provenance too long to repeat whole is windowed like a body; every window
         # still carries its leading lines so no body window loses its provenance.
-        header = provenance_header(s, fixed, count, budget // 3)
-        if header is not None:
-            fixed.append(header)
+        fixed.append(provenance_header(s, fixed, count, limit))
     for s in variable:
         start = 0
         while start < len(s["text"]) or (start == 0 and not s["text"]):
