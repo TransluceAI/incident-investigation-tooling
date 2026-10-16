@@ -1,7 +1,12 @@
 """Build Items from an exported data root and write inference requests.
 
-Every record ends in exactly one place: an Item, the Arquivo ledger, or a gap.
-coverage.jsonl and gaps.jsonl make that accounting auditable.
+Every record ends in exactly one place: an Item (directly or through a source
+adapter), or a gap. coverage.jsonl and gaps.jsonl make that accounting auditable.
+
+Most sources need no code: each record is one self-contained observation, and
+its kind picks a shape (unknown kinds fall back to text). A source whose export
+splits one event across several records registers an adapter in ADAPTERS that
+joins them; Arquivo is the only one.
 
 requests.jsonl holds one self-contained request per (window, axis) for the
 shared inference runner (inference/qwen, REQUESTS.md): finished messages, the
@@ -12,7 +17,9 @@ import json
 import os
 import secrets
 from collections import Counter
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Callable
 
 from . import arquivo_ledger, benchmark, controls, records, shapes
 from .common import atomic_write_text, sha256_file, sha256_text, write_jsonl, classifier_hash
@@ -123,11 +130,22 @@ def _arquivo_items(source, recs, corpus, items, gaps):
     gaps.extend({**g, "source": source} for g in ledger.gaps)
 
 
-ARQUIVO_SOURCE = "arquivo.pt"
+@dataclass(frozen=True)
+class Adapter:
+    """Joins a source's multi-record events into Items before judging."""
+    kinds: frozenset  # record kinds the adapter takes; other kinds from the source stay generic
+    build: Callable  # (source, records, corpus, items, gaps) -> None
+
+
+# Keyed by source name (the path under resources/). An adapter's kinds are joined
+# only for its own source; the same kind elsewhere is an ordinary record.
+ADAPTERS = {
+    "arquivo.pt": Adapter(frozenset(arquivo_ledger.KINDS), _arquivo_items),
+}
 
 
 def build_items(root, corpus, gaps):
-    items, arquivo, seen = {}, {}, set()
+    items, joined, seen = {}, {}, set()
     for source, path in records.sources(Path(root)):
         for line_no, rec, error in records.iter_source_records(path):
             where = {"source": source, "file": str(path.relative_to(root)), "line": line_no}
@@ -144,15 +162,16 @@ def build_items(root, corpus, gaps):
                 gaps.append({**where, "gap": "duplicate_observation", "observation_id": rec["observation_id"]})
                 continue
             seen.add((source, rec["observation_id"]))
-            if rec.get("kind") in arquivo_ledger.KINDS and source == ARQUIVO_SOURCE:
-                arquivo.setdefault(source, []).append(rec)
+            adapter = ADAPTERS.get(source)
+            if adapter is not None and rec.get("kind") in adapter.kinds:
+                joined.setdefault(source, []).append(rec)
                 continue
             shape = shapes.shape_for(rec.get("kind"), source=source)
             key = records.item_key(source, shape, rec)
             item = items.setdefault(key, _new_item(sha256_text(key)[:24], source, shape))
             _observe(item, rec)
-    for source, recs in arquivo.items():
-        _arquivo_items(source, recs, corpus, items, gaps)
+    for source, recs in joined.items():
+        ADAPTERS[source].build(source, recs, corpus, items, gaps)
     return sorted(items.values(), key=lambda i: (i["source"], i["item_id"]))
 
 

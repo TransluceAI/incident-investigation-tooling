@@ -120,7 +120,7 @@ The suite uses synthetic data and simulated runner outputs. It covers evidence p
 
 ## Input format
 
-The export root contains `resources/*/records.jsonl` or recursive `resources/**/DIRECT_RECORDS.jsonl`, one observation per line. Each observation needs a string `observation_id` and `kind`; when `observation_id` is absent, a string `id` is used, as in `DIRECT_RECORDS.jsonl` exports. Archive-ledger kinds (`arquivo_index`, `arquivo_capture`, `provider_redirect`) are reconstructed as Arquivo events only for the `arquivo.pt` source; elsewhere they are ordinary items. Stored text is referenced by `document_path` relative to the export root, with its UTF-8 SHA-256 in `text_sha256`. Records may also carry source, timestamp, and other provenance metadata.
+The export root contains `resources/*/records.jsonl` or recursive `resources/**/DIRECT_RECORDS.jsonl`, one observation per line. Each observation needs a string `observation_id` and `kind`; when `observation_id` is absent, a string `id` is used, as in `DIRECT_RECORDS.jsonl` exports. Each self-contained record needs no source-specific code. A source whose export splits one event across several records registers a join adapter in `prepare.ADAPTERS`, keyed by source name. The only one is `arquivo.pt`, whose CDX index rows, capture bodies and replay redirects are joined into one event per original URL and capture time; the same kinds from any other source are ordinary items. Stored text is referenced by `document_path` relative to the export root, with its UTF-8 SHA-256 in `text_sha256`. Records may also carry source, timestamp, and other provenance metadata.
 
 Adapters map recognized kinds to capture, scanner, wiki, message, or text guidance; unknown kinds retain their text. Adding a dataset may require adapting its record format or kind mapping in `records.py` and `shapes.py`. Scanner views preserve nonempty scalar fields with JSON pointers. Captures with different request URLs remain separate even when their bodies match; other items merge only when source, shape, body hash, and evidence metadata match.
 
@@ -158,7 +158,7 @@ Test metrics are excluded unless explicitly requested with `evaluate --include-t
 
 ## Recorded results
 
-Local verification on 2026-10-16: **65 CPU tests pass**, including the shared-runner contract test against the `inference/qwen` runner from the separate inference branch; without that runner the contract test is skipped. Earlier, the renamed package built successfully as a wheel; its bundled policies and CLI entry point were checked from an extracted installation outside the checkout.
+Local verification on 2026-10-16: **66 CPU tests pass**, including the shared-runner contract test against the `inference/qwen` runner from the separate inference branch; without that runner the contract test is skipped. Earlier, the renamed package built successfully as a wheel; its bundled policies and CLI entry point were checked from an extracted installation outside the checkout.
 
 No actual-model accuracy or calibration results are recorded for this judge yet. GPU compatibility, injection resistance, repeatability, and full-corpus memory/throughput remain unmeasured. Windows preserve text but can separate related context; cross-document reasoning is not implemented. Arquivo experiment results do not establish this judge's performance.
 
