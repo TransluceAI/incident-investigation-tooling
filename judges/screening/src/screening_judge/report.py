@@ -13,9 +13,9 @@ Windows answered no with P(yes) >= near_miss_threshold go to near-misses for
 recall audits; they are never counted as positive.
 
 The review queue holds every request needing a human: verified positives on any
-axis, unverified positives, abstentions, and failures, ranked by P(yes). It has
-no confidence band: P(yes) is uncalibrated, so it orders the queue and nothing
-more. A run expects exactly the requests in its requests.jsonl, so a second-pass
+axis, unverified positives, abstentions, and failures. It is sorted by the
+model's 0-1 confidence for that axis (missing scores last), then by P(yes) from
+the label logprobs. Neither score is calibrated; both only order the queue. A run expects exactly the requests in its requests.jsonl, so a second-pass
 run over a subset of requests reports only those.
 
 Outputs come from the shared runner (inference/qwen). Each committed row must
@@ -176,6 +176,7 @@ def reconcile(run, output_dirs, thresholds=None, near_miss_threshold=0.2):
                           "validated_windows": len(rows), "expected_windows": n,
                           "p_yes_max": max(probs) if probs else None,
                           "p_yes_positive_max": max((r["p_yes"] for r in yes if r["p_yes"] is not None), default=None),
+                          "confidence_max": max((r["result"]["confidence"] for r in rows), default=None),
                           "injection_detected": any(r["result"]["injection_detected"] for r in rows)}
         results.append({"item_id": item_id, "source": item["source"], "shape": item["shape"],
                         "text_sha256s": item["text_sha256s"], "windows": window_counts[item_id],
@@ -202,20 +203,25 @@ def queue_reason(judgment):
 
 
 def review_queue(judgments, items):
-    """Positives on any axis, unverified positives, abstentions and failures, by P(yes)."""
+    """Positives on any axis, unverified positives, abstentions and failures, by confidence then P(yes)."""
     queue = []
     for j in judgments:
         reason = queue_reason(j)
         if reason is None:
             continue
         item = items[j["item_id"]]
-        row = {**j, "queue_reason": reason, "shape": item["shape"], "request_urls": item["request_urls"]}
+        result = j["result"] if isinstance(j.get("result"), dict) else {}
+        confidence = result.get("confidence")
+        confidence = confidence if type(confidence) in (int, float) and 0 <= confidence <= 1 else None
+        row = {**j, "queue_reason": reason, "confidence": confidence,
+               "shape": item["shape"], "request_urls": item["request_urls"]}
         if j["axis"] == "hacking" and reason in ("positive", "unverified_positive"):
             categories = j["result"].get("categories")
             row["findings_cyberattack"] = [FINDINGS_CYBERATTACK[c] for c in dict.fromkeys(categories or ())
                                            if c in FINDINGS_CYBERATTACK]
         queue.append(row)
-    return sorted(queue, key=lambda r: (r["p_yes"] is None, -(r["p_yes"] or 0),
+    return sorted(queue, key=lambda r: (r["confidence"] is None, -(r["confidence"] or 0),
+                                        r["p_yes"] is None, -(r["p_yes"] or 0),
                                         QUEUE_ORDER.index(r["queue_reason"]), r["unit_id"]))
 
 

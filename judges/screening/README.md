@@ -81,14 +81,14 @@ screening-judge report \
 - `summary.json`: item/request counts, validation status, control results, and assessments by axis and shape.
 - `item-results.jsonl`: per-item assessments and completion status for all three axes.
 - `judgments.jsonl`: committed judgments, including validation failures and resolved evidence for validated results.
-- `review-queue.jsonl`: every request needing a human, ranked by P(yes): verified positives on any axis, unverified positives, abstentions, and failures, each with its `queue_reason`. An item can contribute several rows. It carries no confidence band, because P(yes) is uncalibrated.
+- `review-queue.jsonl`: every request needing a human: verified positives on any axis, unverified positives, abstentions, and failures, each with its `queue_reason`. It is sorted by descending `confidence` (missing scores last), then by `p_yes`. An item can contribute several rows.
 - `failures.jsonl`, `pending.jsonl`, `unverified-candidates.jsonl`: failures, unfinished requests, and unresolved positive claims kept separate from negatives.
 - `near-misses.jsonl`, `injection-review.jsonl`: additional candidates for review.
 - `control-results.jsonl`: synthetic controls, excluded from corpus item counts. Request totals include controls.
 
 Reports check prepared artifact hashes, worker configuration against `engine.json`, membership in each worker's selected manifest, and that each result's `request_sha256` matches its prepared request. Positive judgments require schema validity and resolved citations; action references must cite resolved evidence. The model's free-text `location` is unverified. Archive replay responses cannot establish attack success.
 
-`label_probs` and `p_yes` are diagnostic first-token branch scores, not calibrated probabilities. The report computes them from the runner's raw final-answer logprobs; incomplete logprobs produce no score. Optional `--thresholds /path/to/thresholds.json` applies exploratory development-set ranking bands to already verified positives; it never promotes negative or abstaining judgments. Bands are bound to the classifier and inference implementation. Without applicable bands, positives remain `positive_uncalibrated`.
+Every axis answer includes `confidence`, the model's 0–1 estimate that the evidence shows the behaviour that axis asks about, as in the Arquivo judge's hacking confidence. It ranks evidence, not certainty in the chosen label: a confidently negative answer should score near 0. Item results report `confidence_max` per axis. `label_probs` and `p_yes` are diagnostic first-token branch scores. Neither score is a calibrated probability. The report computes them from the runner's raw final-answer logprobs; incomplete logprobs produce no score. Optional `--thresholds /path/to/thresholds.json` applies exploratory development-set ranking bands to already verified positives; it never promotes negative or abstaining judgments. Bands are bound to the classifier and inference implementation. Without applicable bands, positives remain `positive_uncalibrated`.
 
 ## Tests
 
