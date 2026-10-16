@@ -41,8 +41,8 @@ def main():
     p.add_argument('--gpus', type=int, choices=range(1, 9), default=1)
     p.add_argument('--time', default='01:00:00', help='Per-task HH:MM:SS')
     p.add_argument('--stop-at', help='Optional absolute deadline in ISO 8601 with timezone; no default')
-    p.add_argument('--drain-seconds', type=int, default=300,
-                   help='Stop starting batches/retries before the deadline (default: 300 seconds)')
+    p.add_argument('--drain-seconds', type=int, default=900,
+                   help='Minimum drain margin before the deadline, increased by observed batch time (default: 900 seconds)')
     p.add_argument('--resume', action='store_true')
     args = p.parse_args()
     if args.drain_seconds < 0:

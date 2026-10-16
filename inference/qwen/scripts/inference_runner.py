@@ -501,8 +501,8 @@ def run(resources):
     parser.add_argument('--output-dir', required=True)
     parser.add_argument('--worker-id', type=int, required=True)
     parser.add_argument('--stop-at', help='Optional ISO 8601 deadline with timezone')
-    parser.add_argument('--drain-seconds', type=int, default=300,
-                        help='Stop starting batches/retries this many seconds before the deadline (default: 300)')
+    parser.add_argument('--drain-seconds', type=int, default=900,
+                        help='Minimum drain margin before the deadline, increased by observed batch time (default: 900 seconds)')
     parser.add_argument('--max-records', type=int)
     parser.add_argument('--resume', action='store_true')
     parser.add_argument('--validate-only', action='store_true')
@@ -515,7 +515,6 @@ def run(resources):
         deadline = job_deadline(args.stop_at)
     except ValueError as exc:
         parser.error(str(exc))
-    drain_at = deadline - args.drain_seconds
     if time.time() >= deadline:
         raise RuntimeError('Deadline has passed')
     config = json.loads(Path(args.config).read_text())
@@ -579,6 +578,10 @@ def run(resources):
     for key, row in done.items():
         if row['fingerprint'] != input_info[key]:
             raise ValueError('Committed/input hash mismatch')
+    progress_path = directory / 'progress.json'
+    previous = json.loads(progress_path.read_text()) if progress_path.exists() else {}
+    longest_batch_seconds = previous.get('longest_batch_seconds', previous.get('batch_seconds', 0))
+    drain_at = deadline - max(args.drain_seconds, 2 * longest_batch_seconds)
     stopping = False
 
     def stop(signum, frame):
@@ -654,8 +657,11 @@ def run(resources):
                 params = sampling if legacy else [
                     sampling if sampling is not None and attempt == 1 else sampling_for(batch[i][0], attempt)
                     for i in pending]
+                attempt_started = time.monotonic()
                 outputs = llm.chat([batch[i][1] for i in pending], sampling_params=params,
                                    chat_template_kwargs=config['chat_template_kwargs'], use_tqdm=False)
+                longest_batch_seconds = max(longest_batch_seconds, time.monotonic() - attempt_started)
+                drain_at = deadline - max(args.drain_seconds, 2 * longest_batch_seconds)
                 if len(outputs) != len(pending):
                     raise RuntimeError('Missing model outputs; batch not committed')
                 retry = []
@@ -737,7 +743,10 @@ def run(resources):
                 progress['batch_retried_units'] = sum(bool(earlier_attempts(r)) for r in results)
                 progress['batch_retry_output_tokens'] = sum(a['output_tokens'] for r in results
                                                             for a in earlier_attempts(r))
-            write_json(directory / 'progress.json', progress)
+            longest_batch_seconds = max(longest_batch_seconds, progress['batch_seconds'])
+            drain_at = deadline - max(args.drain_seconds, 2 * longest_batch_seconds)
+            progress['longest_batch_seconds'] = longest_batch_seconds
+            write_json(progress_path, progress)
             with open(directory / 'timings.jsonl', 'a') as stream:
                 stream.write(json.dumps(progress)+'\n')
                 stream.flush()

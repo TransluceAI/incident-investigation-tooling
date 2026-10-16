@@ -61,6 +61,7 @@ class SubmissionTests(unittest.TestCase):
         self.assertIn('--array=0-0%1', command)
         self.assertIn('--partition=compute', command)
         self.assertEqual(command[-3], sys.executable)
+        self.assertEqual(command[-1], '900')
         self.assertEqual((self.run / 'inference_runner.py').read_bytes(),
                          (ROOT / 'scripts/inference_runner.py').read_bytes())
         self.assertEqual((self.run / 'run.sbatch').read_bytes(),

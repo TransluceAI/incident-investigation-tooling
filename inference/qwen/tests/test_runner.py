@@ -460,7 +460,7 @@ class DecodingControlTests(unittest.TestCase):
         self._run_retry_case()
 
     def test_retry_stops_after_signal_or_deadline_and_commits_completed_attempt(self):
-        for mode in ('signal', 'deadline', 'drain', 'slurm', 'no_load'):
+        for mode in ('signal', 'deadline', 'drain', 'slurm', 'no_load', 'default_drain', 'adaptive_retry'):
             with self.subTest(mode=mode):
                 self._run_retry_case(mode)
 
@@ -490,6 +490,8 @@ class DecodingControlTests(unittest.TestCase):
                     handlers[r.signal.SIGTERM](r.signal.SIGTERM, None)
                 if first and stop_mode in ('deadline', 'drain', 'slurm'):
                     clock[0] = 2
+                if first and stop_mode == 'adaptive_retry':
+                    clock[0] = 600
                 return [SimpleNamespace(
                     prompt_token_ids=tokenizer.apply_chat_template(chat, **kwargs['chat_template_kwargs']),
                     outputs=[answer(finish='repetition') if first and i == 0 else
@@ -517,13 +519,14 @@ class DecodingControlTests(unittest.TestCase):
                 patch.dict(os.environ, {'SLURM_JOB_END_TIME': '3' if stop_mode == 'slurm' else ''}), \
                 patch.object(r.signal, 'signal', side_effect=lambda sig, fn: handlers.update({sig: fn})), \
                 patch.object(r.time, 'time', side_effect=lambda: clock[0]), \
+                patch.object(r.time, 'monotonic', side_effect=lambda: clock[0]), \
                 contextlib.redirect_stdout(io.StringIO()):
             root = Path(tmp)
             cfg, manifest = root/'config.json', root/'input.jsonl'
             cfg.write_text(json.dumps(self.cfg))
             manifest.write_text(''.join(json.dumps({**self.row, 'unit_id': f'e:w{i}', 'chunk_idx': i,
                                                     'text': 'evidence', 'text_sha256': r.digest(b'evidence')})+'\n'
-                                        for i in range(4 if stop_mode in ('drain', 'slurm') else 2)))
+                                        for i in range(4 if stop_mode in ('drain', 'slurm', 'adaptive_retry') else 2)))
             argv = ['runner', '--config', str(cfg), '--input-manifest', str(manifest),
                     '--output-dir', str(root/'outputs'), '--worker-id', '0']
             if stop_mode == 'deadline':
@@ -532,6 +535,10 @@ class DecodingControlTests(unittest.TestCase):
                 argv += ['--stop-at', '1970-01-01T00:00:03+00:00', '--drain-seconds', '1']
             elif stop_mode == 'slurm':
                 argv += ['--drain-seconds', '1']
+            elif stop_mode == 'adaptive_retry':
+                argv += ['--stop-at', '1970-01-01T00:28:20+00:00']
+            elif stop_mode == 'default_drain':
+                argv += ['--stop-at', '1970-01-01T00:10:00+00:00']
             elif stop_mode == 'no_load':
                 argv += ['--stop-at', '1970-01-01T00:00:03+00:00', '--drain-seconds', '4']
             with patch.object(sys, 'argv', argv):
@@ -547,7 +554,7 @@ class DecodingControlTests(unittest.TestCase):
                 else:
                     r.main()  # every unit succeeded after retry: no SystemExit(2)
             worker = root/'outputs/worker-0'
-            if stop_mode == 'no_load':
+            if stop_mode in ('no_load', 'default_drain'):
                 self.assertEqual(loads, [])
                 self.assertEqual(list(worker.glob('part-*.jsonl')), [])
                 self.assertEqual(json.loads((worker/'summary.json').read_text())['unfinished'], 2)
@@ -559,7 +566,7 @@ class DecodingControlTests(unittest.TestCase):
             self.assertEqual(len(calls), 1)
             self.assertEqual([row['status'] for row in rows], ['failed', 'success'])
             self.assertEqual(summary['committed'], 2)
-            self.assertEqual(summary['unfinished'], 2 if stop_mode in ('drain', 'slurm') else 0)
+            self.assertEqual(summary['unfinished'], 2 if stop_mode in ('drain', 'slurm', 'adaptive_retry') else 0)
             self.assertEqual(summary['failed'], 1)
             self.assertEqual(summary['retried_units'], 0)
             return

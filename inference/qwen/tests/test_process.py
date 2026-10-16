@@ -33,6 +33,10 @@ def engine_child(root):
                 finishes[-1] = fault['reason']
             elif fault.get('retry') and call == fault['call'] - 1:
                 finishes[-1] = 'length'
+        durations = root / 'durations.json'
+        if durations.exists():
+            seconds = json.loads(durations.read_text())[call - 1]
+            (root / 'clock').write_text(str(float((root / 'clock').read_text()) + seconds))
         print(json.dumps(finishes), flush=True)
 
 
@@ -68,6 +72,7 @@ def run_with_engine(root, argv):
         'vllm.sampling_params': SimpleNamespace(StructuredOutputsParams=lambda **k: k)})
     # Advance the runner's wall clock deterministically while its child is busy.
     r.time.time = lambda: float((root / 'clock').read_text())
+    r.time.monotonic = r.time.time
     sys.argv = ['runner', *argv]
     try:
         r.main()
@@ -129,6 +134,45 @@ class ProcessTests(unittest.TestCase):
                     self.assertEqual([[chat[-1]['content'] for chat in json.loads(line)]
                                       for line in generated_after], [['2', '3'], ['4']])
 
+    def test_adaptive_margin_retains_slowest_batch_across_resume(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / 'clock').write_text('0')
+            (root / 'release-engine').touch()
+            (root / 'durations.json').write_text('[1100, 800, 1]')
+            config = {'model': '/fake/model', 'system_prompt': 'Return JSON', 'schema': {'type': 'object'},
+                      'chat_template_kwargs': {'enable_thinking': False}, 'engine': {'max_model_len': 100},
+                      'sampling': {'max_tokens': 10}, 'host_batch_records': 2, 'host_batch_tokens': 100}
+            (root / 'config.json').write_text(json.dumps(config))
+            (root / 'input.jsonl').write_text(''.join(json.dumps({
+                'unit_id': str(i), 'chunk_idx': 0, 'text': str(i),
+                'text_sha256': r.digest(str(i).encode())}) + '\n' for i in range(6)))
+            argv = [sys.executable, '-B', __file__, 'runner', str(root),
+                    '--config', str(root / 'config.json'), '--input-manifest', str(root / 'input.jsonl'),
+                    '--output-dir', str(root / 'outputs'), '--worker-id', '0']
+            env = {**os.environ, 'SLURM_JOB_END_TIME': '4000'}
+            worker = root / 'outputs/worker-0'
+            stopped = subprocess.run(argv, env=env, capture_output=True, text=True, timeout=10)
+            self.assertEqual(stopped.returncode, 2, stopped.stdout + stopped.stderr)
+            progress = json.loads((worker / 'progress.json').read_text())
+            self.assertEqual(progress['batch_seconds'], 800)
+            self.assertEqual(progress['longest_batch_seconds'], 1100)
+            summary = json.loads((worker / 'summary.json').read_text())
+            self.assertEqual((summary['committed'], summary['unfinished']), (4, 2))
+            generated = (root / 'generated.jsonl').read_bytes()
+            # 2100 seconds remain, exceeding the default minimum but not twice
+            # the observed 1100-second batch. Resume must not load another engine.
+            stopped = subprocess.run(argv + ['--resume'], env=env, capture_output=True, text=True, timeout=10)
+            self.assertEqual(stopped.returncode, 2, stopped.stdout + stopped.stderr)
+            self.assertNotIn('"event": "loading"', stopped.stdout)
+            self.assertEqual((root / 'generated.jsonl').read_bytes(), generated)
+            # A fresh allocation has enough time to finish the remaining batch.
+            (root / 'clock').write_text('0')
+            finished = subprocess.run(argv + ['--resume'], env=env, capture_output=True, text=True, timeout=10)
+            self.assertEqual(finished.returncode, 0, finished.stdout + finished.stderr)
+            summary = json.loads((worker / 'summary.json').read_text())
+            self.assertEqual((summary['committed'], summary['unfinished'], summary['failed']), (6, 0, 0))
+
     def exercise_stop(self, mode):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -175,6 +219,7 @@ class ProcessTests(unittest.TestCase):
             first = worker / 'part-000000.jsonl'
             original = first.read_bytes()
             (root / 'clock').write_text('0')
+            env['SLURM_JOB_END_TIME'] = '3000'
             resumed = subprocess.run(argv + ['--resume'], env=env, capture_output=True, text=True, timeout=10)
             self.assertEqual(resumed.returncode, 0, resumed.stdout + resumed.stderr)
             self.assertEqual(first.read_bytes(), original)

@@ -4,7 +4,7 @@ umask 022
 run=$1
 python=$2
 stop_at=${3:-}
-drain_seconds=${4:-300}
+drain_seconds=${4:-900}
 worker=${SLURM_ARRAY_TASK_ID:-0}
 mapfile -t inputs < "$run/inputs.txt"
 manifest=${inputs[$worker]}
