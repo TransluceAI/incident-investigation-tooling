@@ -17,6 +17,7 @@ from collections import Counter, defaultdict
 from pathlib import Path
 
 from . import rules
+from .controls import SOURCE as CONTROL_SOURCE
 from .common import atomic_write_text, iter_jsonl, sha256_file, sha256_text, write_jsonl
 from .prepare import runner_profile, write_shards
 from .report import review_queue
@@ -25,9 +26,10 @@ COPIED = ("config.json", "windows.jsonl", "items.jsonl", "coverage.jsonl", "gaps
 POSITIVE = ("positive", "unverified_positive")
 
 
-def _judgments(report, preparation):
+def _judgments(report, preparation_sha256):
+    """A report's judgments, refusing any reconciled against a different prepared run."""
     rows = {j["unit_id"]: j for j in iter_jsonl(Path(report) / "judgments.jsonl")}
-    if any(j.get("config_sha256") != preparation["config_sha256"] for j in rows.values()):
+    if any(j.get("preparation_sha256") != preparation_sha256 for j in rows.values()):
         raise ValueError("Report does not belong to this prepared run")
     return rows
 
@@ -62,7 +64,7 @@ def escalate(run, report, out, engine_template, borderline=(0.2, 0.8), audit_rat
     preparation = json.loads((run / "preparation.json").read_text())
     if preparation.get("pass", 1) != 1:
         raise ValueError("Escalate from a pass-1 run")
-    judgments = _judgments(report, preparation)
+    judgments = _judgments(report, sha256_file(run / "preparation.json"))
     pending = list(iter_jsonl(Path(report) / "pending.jsonl"))
     if pending and not allow_pending:
         raise ValueError(f"Pass 1 has {len(pending)} pending requests; finish it or pass allow_pending")
@@ -101,7 +103,9 @@ def escalate(run, report, out, engine_template, borderline=(0.2, 0.8), audit_rat
                           "judgments_sha256": sha256_file(Path(report) / "judgments.jsonl")},
                "artifact_hashes": {name: sha256_file(out / name) for name in
                                    ("requests.jsonl", "engine.json", "selection.jsonl", *COPIED[1:])}}
-    if shards > 1:
+    if not selected:
+        summary["note"] = "No requests selected; there is nothing to run for pass 2."
+    elif shards > 1:
         names, loads = write_shards(out, shards)
         summary["artifact_hashes"].update({name: sha256_file(out / name) for name in names})
         summary["shard_characters"] = loads
@@ -116,17 +120,23 @@ def combine(pass1_report, pass2_run, pass2_report, out):
         raise ValueError("Not a pass-2 run")
     if sha256_file(Path(pass1_report) / "judgments.jsonl") != preparation["parent"]["judgments_sha256"]:
         raise ValueError("Pass-1 report differs from the one pass 2 was selected from")
-    first = _judgments(pass1_report, preparation)
-    second = _judgments(pass2_report, preparation)
+    first = _judgments(pass1_report, preparation["parent"]["preparation_sha256"])
+    second = _judgments(pass2_report, sha256_file(pass2_run / "preparation.json"))
     selection = {r["custom_id"]: r["reasons"] for r in iter_jsonl(pass2_run / "selection.jsonl")}
     if set(second) - set(selection):
         raise ValueError("Pass-2 report contains requests that were not selected")
     items = {i["item_id"]: i for i in iter_jsonl(pass2_run / "items.jsonl")}
-    final, demoted, changes = [], [], Counter()
+    final, demoted, unresolved, controls, changes = [], [], [], [], Counter()
     audit = Counter()
     for uid, j1 in first.items():
         j2 = second.get(uid)
         reasons = selection.get(uid, [])
+        if j1.get("source") == CONTROL_SOURCE:
+            # Synthetic controls are kept apart, as in the ordinary report.
+            controls.append({**(j2 if j2 is not None and j2["validation_status"] == "validated" else j1),
+                             "pass": 2 if j2 is not None and j2["validation_status"] == "validated" else 1,
+                             "selection_reasons": reasons})
+            continue
         if uid in selection and j2 is None:
             changes["pass2_pending"] += 1
         if j2 is not None and j2["validation_status"] == "validated":
@@ -143,20 +153,26 @@ def combine(pass1_report, pass2_run, pass2_report, out):
         else:
             chosen = {**j1, "pass": 1}
             if j2 is not None:
+                # Keep the pass-1 classification, but the failed or unverified pass-2
+                # answer (for example an uncited pass-2 yes) still goes to review.
                 changes["pass2_failed"] += 1
                 chosen["pass2_error"] = j2.get("validation_error")
+                unresolved.append({**j2, "pass": 2, "pass1_reason": _reason(j1), "selection_reasons": reasons})
         final.append({**chosen, "selection_reasons": reasons})
     lowered = {d["unit_id"] for d in demoted}
-    queue = review_queue([j for j in final if j["unit_id"] not in lowered], items)
+    queue = review_queue([j for j in final if j["unit_id"] not in lowered] + unresolved, items)
     out.mkdir(parents=True, exist_ok=True)
     write_jsonl(out / "final-judgments.jsonl", final)
+    write_jsonl(out / "control-judgments.jsonl", controls)
     write_jsonl(out / "review-queue.jsonl", queue)
     write_jsonl(out / "demoted.jsonl", sorted(demoted, key=_pass1_rank))
     summary = {"requests": len(final), "pass2_requests": len(selection), "pass2_validated": sum(
                    j["pass"] == 2 for j in final), **dict(changes),
                "review_queue": dict(Counter(q["queue_reason"] for q in queue)), "demoted_queue": len(demoted),
-               "audit": {**dict(audit), "note": "Pass-2 positives among randomly audited pass-1 negatives; "
-                                                "an estimate of pass-1 misses, not a measured recall."},
+               "pass2_unresolved_queued": len(unresolved),
+               "audit": {**dict(audit), "note": "Counts audited pass-1 negatives that pass 2 validated, and how many "
+                                                "of those pass 2 answered yes. Observed flips only: not an estimate "
+                                                "of total misses or recall."},
                "selection": preparation["selection"]}
     atomic_write_text(out / "summary.json", json.dumps(summary, indent=2) + "\n")
     return summary

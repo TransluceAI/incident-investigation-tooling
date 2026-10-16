@@ -103,6 +103,8 @@ def reconcile(run, output_dirs, thresholds=None, near_miss_threshold=0.2):
     manifests = {digest: run / name for name, digest in preparation["artifact_hashes"].items()
                  if name == "requests.jsonl" or name.startswith("shards/")}
     requested = {row["custom_id"]: request_sha256(row["body"]) for row in iter_jsonl(run / "requests.jsonl")}
+    # preparation.json hashes requests.jsonl and engine.json, so this names the exact execution.
+    preparation_sha256 = sha256_file(run / "preparation.json")
     outputs, inference_hash = load_outputs(output_dirs, engine, manifests)
     if thresholds is not None and thresholds.get("inference_sha256") != inference_hash:
         raise ValueError("Threshold inference implementation does not match this run")
@@ -129,6 +131,7 @@ def reconcile(run, output_dirs, thresholds=None, near_miss_threshold=0.2):
             base = {"unit_id": uid, "item_id": w["item_id"], "axis": axis, "window_id": w["window_id"],
                     "result": row.get("result"), "label_probs": probs, "p_yes": (probs or {}).get("yes"),
                     "run_identity": row.get("run_identity"), "config_sha256": preparation["config_sha256"],
+                    "preparation_sha256": preparation_sha256,
                     "source": items[w["item_id"]]["source"]}
             try:
                 if row.get("custom_id") != uid or row.get("request_sha256") != requested.get(uid):

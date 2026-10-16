@@ -253,6 +253,20 @@ class EvidenceTests(unittest.TestCase):
                 covered.update(range(*offsets['S1']))
         self.assertEqual(covered, set(range(len(long))))
 
+    def test_single_long_provenance_line_still_heads_every_window(self):
+        segs = [{'segment_id': 'S0', 'kind': 'ITEM', 'source': 'item', 'text': 'source: paste.example'},
+                {'segment_id': 'S1', 'kind': 'PROVENANCE', 'source': 'records', 'text': 'line-0 ' + 'p' * 9000},
+                {'segment_id': 'S2', 'kind': 'BODY', 'source': 'document:x', 'text': 'body text ' * 4000}]
+        body = [w for w, _ in windows(segs, len, 6000) if any(s['kind'] == 'BODY' for s in w)]
+        self.assertGreater(len(body), 5)
+        for window in body:
+            header, = [s for s in window if s['kind'] == 'PROVENANCE_HEADER']
+            self.assertTrue(header['text'].startswith('line-0 ppp'))
+            self.assertIn('provenance continues in the windows of segment S1', header['text'])
+        # When not even a short prefix fits, preparation fails instead of dropping provenance.
+        with self.assertRaisesRegex(ValueError, 'provenance'):
+            list(windows(segs, lambda text: len(text) + 5500, 6000))
+
     def test_corrupt_chunk_map_becomes_validation_failure(self):
         u=self.unit();u['source_offsets']['S0'][1] += 1
         row={'status':'success','text_sha256':u['text_sha256'],'result':result('hacking')}

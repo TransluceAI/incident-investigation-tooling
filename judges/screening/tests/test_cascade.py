@@ -140,6 +140,99 @@ class CascadeTests(unittest.TestCase):
             (self.run/'report/judgments.jsonl').write_text('')
             cascade.combine(self.run/'report', out, out/'report', self.root/'final2')
 
+    def pass2_answers(self, out, labels=None, bad_citation=()):
+        """Commit pass-2 answers for every selected request (default no)."""
+        windows = {w['window_id']: w for w in iter_jsonl(out/'windows.jsonl')}
+        rows = []
+        for r in iter_jsonl(out/'requests.jsonl'):
+            uid = r['custom_id']
+            res = result(uid.rsplit(':', 1)[1], (labels or {}).get(uid, 'no'))
+            if res['label'] == 'yes':
+                w = windows[uid.rsplit(':', 1)[0]]
+                sid = next(k for k, v in w['segment_kinds'].items() if v == 'BODY')
+                res['evidence'] = [{'segment_id': sid, 'chunk_id': 9999 if uid in bad_citation else 1,
+                                    'location': 'body'}]
+            rows.append({**answered(out, uid), 'status': 'success', 'result': res})
+        write_worker(out, rows)
+        write_report(out/'report', *reconcile(out, [out/'outputs']), None)
+
+    def test_reports_are_bound_to_their_own_prepared_run(self):
+        self.pass1(self.outcomes())
+        a, b = self.root/'pass2a', self.root/'pass2b'
+        cascade.escalate(self.run, self.run/'report', a, THINKING, audit_rate=1.0)
+        cascade.escalate(self.run, self.run/'report', b, {**THINKING, 'sampling': {**THINKING['sampling'], 'seed': 3}},
+                         audit_rate=1.0)
+        self.pass2_answers(a)
+        with self.assertRaisesRegex(ValueError, 'does not belong'):
+            cascade.combine(self.run/'report', b, a/'report', self.root/'swapped')
+        with self.assertRaisesRegex(ValueError, 'does not belong'):
+            cascade.combine(self.run/'report', a, self.run/'report', self.root/'pass1-as-pass2')
+        with self.assertRaisesRegex(ValueError, 'pass-1'):
+            cascade.escalate(a, a/'report', self.root/'again', THINKING)
+        cascade.combine(self.run/'report', a, a/'report', self.root/'ok')
+
+    def test_unresolved_pass2_answers_stay_in_the_queue(self):
+        self.pass1(self.outcomes())
+        out = self.root/'pass2'
+        cascade.escalate(self.run, self.run/'report', out, THINKING, audit_rate=1.0)
+        uid = self.uid[('c', 'hacking')]
+        self.pass2_answers(out, {uid: 'yes'}, bad_citation={uid})
+        summary = cascade.combine(self.run/'report', out, out/'report', self.root/'final')
+        final = {j['unit_id']: j for j in iter_jsonl(self.root/'final/final-judgments.jsonl')}
+        self.assertEqual((final[uid]['pass'], final[uid]['result']['label']), (1, 'no'))  # pass 1 kept
+        queued = [q for q in iter_jsonl(self.root/'final/review-queue.jsonl') if q['unit_id'] == uid]
+        self.assertEqual([(q['pass'], q['queue_reason']) for q in queued], [(2, 'unverified_positive')])
+        self.assertEqual((summary['pass2_failed'], summary['pass2_unresolved_queued']), (1, 1))
+        # Six audited requests; the failed one is not counted among validated audit answers.
+        self.assertEqual(summary['audit'], {'audited': 5, 'pass2_positive': 0, 'note': summary['audit']['note']})
+
+    def test_controls_stay_out_of_cascade_queues_and_counts(self):
+        from screening_judge.common import write_jsonl
+        from screening_judge.controls import SOURCE
+        from screening_judge.prepare import prepare
+        write_jsonl(self.data/'resources/sample/records.jsonl', [self.record('a', 'ordinary text')])
+        self.run = self.root/'pass1'
+        prepare(self.data, self.run, lambda chat: sum(len(m['content']) for m in chat), 15000, config())
+        rows = [{**answered(self.run, r['custom_id']), 'status': 'success',
+                 'result': result(r['custom_id'].rsplit(':', 1)[1], 'insufficient_evidence')}
+                for r in iter_jsonl(self.run/'requests.jsonl')]
+        write_worker(self.run, rows)
+        write_report(self.run/'report', *reconcile(self.run, [self.run/'outputs']), None)
+        out = self.root/'pass2'
+        cascade.escalate(self.run, self.run/'report', out, THINKING, audit_rate=0)
+        self.pass2_answers(out)
+        summary = cascade.combine(self.run/'report', out, out/'report', self.root/'final')
+        controls = list(iter_jsonl(self.root/'final/control-judgments.jsonl'))
+        self.assertTrue(controls and all(c['source'] == SOURCE for c in controls))
+        for name in ('final-judgments', 'review-queue', 'demoted'):
+            self.assertFalse(any(r['source'] == SOURCE for r in iter_jsonl(self.root/f'final/{name}.jsonl')))
+        self.assertEqual(summary['requests'], 3)  # the corpus item's three axes only
+
+    def test_shards_never_outnumber_selected_windows(self):
+        self.pass1(self.outcomes({('a', 'hacking'): ('yes', .9)}))
+        out = cascade.escalate(self.run, self.run/'report', self.root/'one', THINKING, audit_rate=0, shards=8)
+        # Window a (positive) and window b (rule hit) are selected: two shards, none empty.
+        names = sorted(p.name for p in (self.root/'one/shards').iterdir())
+        self.assertEqual(names, ['part-0.jsonl', 'part-1.jsonl'])
+        self.assertTrue(all((self.root/'one/shards'/n).stat().st_size for n in names))
+        self.assertEqual(len(out['shard_characters']), 2)
+
+    def test_escalation_that_selects_nothing_writes_no_shards(self):
+        from screening_judge.common import write_jsonl
+        from screening_judge.prepare import prepare
+        write_jsonl(self.data/'resources/sample/records.jsonl', [self.record('a', 'ordinary text')])
+        self.run = self.root/'pass1'
+        prepare(self.data, self.run, lambda chat: sum(len(m['content']) for m in chat), 15000, config(),
+                with_controls=False)
+        write_worker(self.run, [{**answered(self.run, r['custom_id']), 'status': 'success',
+                                 'result': result(r['custom_id'].rsplit(':', 1)[1])}
+                                for r in iter_jsonl(self.run/'requests.jsonl')])
+        write_report(self.run/'report', *reconcile(self.run, [self.run/'outputs']), None)
+        summary = cascade.escalate(self.run, self.run/'report', self.root/'none', THINKING, audit_rate=0, shards=8)
+        self.assertEqual(summary['requests'], 0)
+        self.assertIn('nothing to run', summary['note'])
+        self.assertFalse((self.root/'none/shards').exists())
+
 
 if __name__ == '__main__':
     unittest.main()

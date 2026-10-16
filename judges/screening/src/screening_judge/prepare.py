@@ -247,12 +247,16 @@ def write_shards(out, shards):
     """
     from itertools import groupby
     from .common import iter_jsonl
+    window = lambda row: row["custom_id"].rsplit(":", 1)[0]
+    groups = sum(1 for _ in groupby(iter_jsonl(out / "requests.jsonl"), key=window))
+    if not groups:
+        raise ValueError("No requests to shard")
+    shards = min(shards, groups)  # the launcher refuses empty shard files
     (out / "shards").mkdir()
     loads = [0] * shards
     names = [f"shards/part-{i}.jsonl" for i in range(shards)]
     with contextlib.ExitStack() as stack:
         writers = [stack.enter_context(jsonl_stream(out / name)) for name in names]
-        window = lambda row: row["custom_id"].rsplit(":", 1)[0]
         for _, group in groupby(iter_jsonl(out / "requests.jsonl"), key=window):
             worker = min(range(shards), key=lambda i: (loads[i], i))
             for row in group:
