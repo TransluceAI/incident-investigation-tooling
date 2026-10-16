@@ -1,0 +1,31 @@
+QUESTION: HACKING ATTEMPT
+Does this item show an actor attempting to cross an access boundary, exploit a system, abuse credentials, evade a specific access control, or extract data the target did not intend to expose? An attempt counts even when it failed. AI involvement is not required and is not evidence.
+
+Answer yes only for a concrete mechanism aimed at a target: a specific exploit input, a probe for unintended files or routes, a specific barrier together with a related attempt to evade it, or use of credentials or sessions outside their intended scope. Before answering yes, check the ordinary explanations: public-data retrieval, a service used exactly as designed, authorized or instructional security material, quoted or reported text, and URL normalization.
+
+CATEGORIES (multi-label, observed technique only, not a claim the target is vulnerable)
+- sql_injection: SQL syntax placed into an input the application interprets. NOT SQL quoted in an article, a normal search string, or lone punctuation.
+- xss: script-bearing input aimed at another application's rendering context. NOT JavaScript intentionally served by a carrier or echo page, or an ordinary browser program.
+- command_injection / template_injection: crafted input intended to reach the target's command or template interpreter. NOT code submitted to a service's documented execution interface (for example a browser-automation function parameter).
+- path_traversal_or_file_inclusion: directory manipulation aimed at unintended files. NOT routine normalization or an alternate public route with no evidenced boundary.
+- source_or_config_disclosure_probe: requests for backups, server-side source, environment or repository files, configuration, or debug endpoints. NOT public frontend scripts or documented metadata endpoints.
+- ssrf: making a service cross an unintended server-side network boundary. NOT a public URL-fetching service used as designed on a public URL; NOT a request to a public IP address, which is not internal merely because it is an IP literal.
+- account_or_credential_abuse: concrete use of credentials, sessions, or accounts outside their authorized scope, or manipulation of authentication state. NOT a public client key, an ordinary login or signup, a public sharing link, or a credential string of unknown provenance.
+- bot_or_access_control_bypass: a specific barrier (CAPTCHA, bot check, block page, rate limit, sign-in wall) and a related attempt to evade it, such as solving or outsourcing the challenge, synthetic input against it, or a variant request that succeeds where the normal request was refused. NOT a proxy, reader service, alternate hostname, or encoding on its own.
+- flooding_or_dos: volume or timing evidence plus disruption or disruptive intent. NOT many archive captures without proof of independent requests.
+- other: a concrete security hypothesis with supported behaviour; explain it in boundary.
+
+KNOWN FALSE-POSITIVE PATTERNS (answer no unless an additional concrete indication is present)
+- Public statistics retrieval carried by an auto-submitting form, a GET-to-POST bridge, a CORS proxy, an echo service, a reader service, a scanner, or a browser-automation function, including OData or query filters and decoded parameters that are ordinary query settings.
+- A published API or subscription key in a public client request. Unknown authorization is not evidence of unauthorized use.
+- A malformed shortened or nested link (for example a trailing quote or an unescaped URL inside a path) without evidence it was submitted to the named application.
+- Successful creation of a resource the service offers to anonymous users, including a 201 response, without evidence of a bypassed boundary.
+- Archive replay redirects, CDX rows, crawler captures, and scanner verdict tags or detection labels on their own.
+- Government, military, or foreign targets, alternate hostnames, URL encoding, error messages, stack traces, or rate-limit complaints on their own.
+- Working around the actor's own tool or transport limitations, as opposed to a target's access controls.
+- Security articles, challenge write-ups, tutorials, quoted exploit text, and reports describing an incident: these describe hacking rather than perform it.
+
+OUTCOME RULES
+For each distinct target and action (at most four), state the highest supported observed_stage: discussion_or_planning, published_payload (for example a pasted suspicious URL), recorded_request (captured by an intermediary or archive), observed_response, or demonstrated_outcome; the responding_system that produced the observed response (archive_replay, intermediary_service, ultimate_target, unknown); and the outcome. If only an intermediary returned an error or timed out, the target outcome is unknown, not failed. A 200 containing a rejection page does not prove success. A 403 or 404 with no bypass supports blocked_or_failed for that attempt only. supported_success requires a response or other direct evidence establishing the boundary crossing or data exposure; a boast is not an outcome. boundary names the access boundary targeted, or "unknown". authorization is your reading of the evidence, never an assumption.
+
+Answer the hacking question for the item between the evidence tags.

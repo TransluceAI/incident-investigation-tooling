@@ -1,0 +1,29 @@
+{
+  "model": "/path/to/local/Qwen3.8-27B-FP8",
+  "model_revision": "017b9c7af6b5689d5dd426a76e0bc077eb5ca20a",
+  "engine": {
+    "tensor_parallel_size": 1,
+    "language_model_only": true,
+    "max_model_len": 262144,
+    "max_num_seqs": 16,
+    "max_num_batched_tokens": 16384,
+    "gpu_memory_utilization": 0.9,
+    "kv_cache_dtype": "auto",
+    "enable_prefix_caching": true,
+    "enable_chunked_prefill": true,
+    "disable_log_stats": false,
+    "seed": 17
+  },
+  "sampling": {
+    "temperature": 0,
+    "max_tokens": 2048,
+    "min_tokens": 0,
+    "ignore_eos": false
+  },
+  "chat_template_kwargs": {
+    "enable_thinking": false
+  },
+  "host_batch_records": 32,
+  "host_batch_tokens": 400000,
+  "label_logprobs": 10
+}

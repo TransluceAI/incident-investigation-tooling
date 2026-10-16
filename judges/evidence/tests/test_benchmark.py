@@ -1,0 +1,85 @@
+import json
+import tempfile
+import unittest
+from pathlib import Path
+
+from evidence_judge.common import sha256_text, write_jsonl, iter_jsonl
+from evidence_judge.prepare import prepare
+from evidence_judge import evaluate
+from evidence_judge.report import reconcile
+from test_pipeline import config
+from test_evaluate import prediction
+
+
+class BenchmarkTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        self.data = self.root/'data'
+        self.data.mkdir()
+
+    def inputs(self):
+        body='Preserved public document.'
+        (self.data/'positive-labelled-path.txt').write_text(body)
+        rows=[{'id':f'positive-case-{i}','document_path':'positive-labelled-path.txt',
+               'text_sha256':sha256_text(body),'metadata':{'source_family':'wiki','format':'text',
+                 'answer':'SECRET_KEY_HINT','review_reason':'SECRET_REVIEW_HINT'},
+               'overall_label':'SECRET_LABEL_HINT'} for i in range(2)]
+        write_jsonl(self.data/'inputs.jsonl',rows)
+        # Deliberately unreadable: preparation must never open the answer key.
+        (self.data/'answer_key.jsonl').write_bytes(b'\xffINVALID_SECRET_ANSWER_KEY')
+        return rows
+
+    def run_prepare(self):
+        return prepare(self.data,self.root/'run',lambda chat:sum(len(m['content']) for m in chat)//4,
+                       6000,config(),with_controls=False,benchmark_manifest='inputs.jsonl')
+
+    def test_neutral_inputs_and_full_document_without_label_leakage(self):
+        rows=self.inputs();summary=self.run_prepare()
+        self.assertEqual(summary['items'],2)
+        units=list(iter_jsonl(self.root/'run/manifest.jsonl'))
+        for unit in units:
+            self.assertIn('Preserved public document.',unit['text'])
+            self.assertIn('wiki',unit['text'])
+            for secret in ('SECRET_', 'positive-case', 'positive-labelled-path', 'answer_key'):
+                self.assertNotIn(secret,unit['text'])
+        results=reconcile(self.root/'run',[])[1]
+        self.assertEqual({r['benchmark_case_id'] for r in results},{r['id'] for r in rows})
+
+    def test_duplicate_ids_rejected(self):
+        rows=self.inputs();write_jsonl(self.data/'inputs.jsonl',[rows[0],rows[0]])
+        with self.assertRaisesRegex(ValueError,'Duplicate benchmark'):self.run_prepare()
+
+    def test_hash_and_path_escape_fail_closed(self):
+        rows=self.inputs();rows[0]['text_sha256']='0'*64
+        rows[1]['document_path']='../outside.txt';(self.root/'outside.txt').write_text('outside')
+        write_jsonl(self.data/'inputs.jsonl',rows)
+        self.assertEqual(self.run_prepare()['excluded_integrity'],2)
+
+    def test_shared_body_is_disambiguated_by_case_id(self):
+        a=prediction('same','positive_uncalibrated',iid='a');a['benchmark_case_id']='positive'
+        b=prediction('same','no_evidence',iid='b');b['benchmark_case_id']='negative'
+        by_hash=evaluate.predictions([a,b])
+        self.assertIs(evaluate.case_prediction(by_hash,{'id':'positive','document_sha256':'same'},'overall')[0],True)
+        self.assertIs(evaluate.case_prediction(by_hash,{'id':'negative','document_sha256':'same'},'overall')[0],False)
+        self.assertIsNone(evaluate.case_prediction(by_hash,{'id':'unknown','document_sha256':'same'},'overall')[0])
+
+if __name__=='__main__':unittest.main()
+
+class IdentityAndPartitionTests(unittest.TestCase):
+    def test_mixed_inference_implementations_cannot_fit_bands(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            p=Path(tmp)
+            a=prediction('a');b=prediction('b')
+            a['inference_sha256']='old';b['inference_sha256']='new'
+            write_jsonl(p/'results',[a,b]);write_jsonl(p/'key',[])
+            with self.assertRaisesRegex(ValueError,'Mixed'):
+                evaluate.evaluate(p/'results',p/'key')
+
+    def test_reserved_split_does_not_claim_historical_independence(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            p=Path(tmp);write_jsonl(p/'results',[]);write_jsonl(p/'key',[])
+            report,_=evaluate.evaluate(p/'results',p/'key',include_test=True)
+            self.assertTrue(report['test_evaluated'])
+            self.assertEqual(report['historical_holdout_independence'],'unverified')

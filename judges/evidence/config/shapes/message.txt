@@ -1,0 +1,2 @@
+EVIDENCE SHAPE: PUBLISHED MESSAGE
+The item is a short message published to a public notification topic, message service, or similar channel. The topic or channel name and message time come from the service; the author is whoever published to the topic, which is usually not identified. Short messages can still be judged when their content is meaningful.
