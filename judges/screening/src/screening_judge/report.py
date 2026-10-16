@@ -273,10 +273,6 @@ def write_report(dest, config, results, judgments, failures, pending, unverified
         "confidence_on_negatives": {"validated_no": len(negative), "above_half": sum(
             type(j["result"].get("confidence")) in (int, float) and j["result"]["confidence"] > .5 for j in negative)},
         "failure_reasons": dict(Counter(f["validation_error"].split(":")[0] for f in failures)),
-        "scope": "Screening for expert review. requests_expected, validated and label-score diagnostics include controls; item counts and reviewer files exclude them.",
-        "score_semantics": "label_probs/p_yes are diagnostic first-token branch scores, not calibrated probabilities.",
-        "release_ready": False,
-        "release_note": "Requires held-out accuracy, per-axis labels, actual-model canaries and runtime validation.",
     }
     atomic_write_text(dest / "summary.json", json.dumps(summary, indent=2) + "\n")
     return summary

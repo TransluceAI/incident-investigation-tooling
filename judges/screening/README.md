@@ -76,7 +76,7 @@ screening-judge report \
   --out "$RUN_ROOT/report"
 ```
 
-- `summary.json`: item/request counts, validation status, control results, and assessments by axis and shape.
+- `summary.json`: item/request counts, validation status, control results, and assessments by axis and shape. `requests_expected`, `validated` and label-score diagnostics include controls; item counts and reviewer files exclude them.
 - `item-results.jsonl`: per-item assessments and completion status for all three axes.
 - `judgments.jsonl`: all committed judgments, including synthetic controls, validation failures and resolved evidence. Cascade reconciliation reads this complete file.
 - `review-queue.jsonl`: every request needing a human: verified positives on any axis, unverified positives, abstentions, and failures, each with its `queue_reason`, in that order. Within each reason it is sorted by descending `confidence` (missing scores last), then by `p_yes`. An item can contribute several rows.
@@ -178,7 +178,7 @@ screening-judge evaluate \
 
 Each key row requires a unique `id` and a `document_sha256`, with labels in `overall_label` and/or `axis_labels`. Axis label keys are `hacking`, `agentic_activity`, and `collusion` (mapped to coordination). `overall` means any of the three axes. Missing axis labels remain unlabeled. Optional `leakage_group` and `evaluation_partition` fields define related cases and explicit train/dev/test assignments; repeated document hashes are allowed and remain in the same partition. Conflicting assignments fail.
 
-Evaluation reports coverage, missing/ambiguous/undecided cases, conditional TPR/FPR/precision/MCC, and end-to-end positive recall. Ambiguous shared-body joins require an explicit `item_id`, or a matching benchmark case ID. Confidence intervals resample connected leakage groups; degenerate intervals do not establish zero error.
+Evaluation reports coverage, missing/ambiguous/undecided cases, conditional TPR/FPR/precision/MCC (decided cases only, so read coverage alongside them), end-to-end positive recall, and a `projection` of precision and review load at assumed prevalences, which holds only if the measured rates transfer. Ambiguous shared-body joins require an explicit `item_id`, or a matching benchmark case ID. Confidence intervals resample connected leakage groups; degenerate intervals do not establish zero error.
 
 Test metrics are excluded unless explicitly requested with `evaluate --include-test` for a frozen candidate. Holdout data must be independent of model and prompt tuning; assigning a partition does not establish that independence.
 

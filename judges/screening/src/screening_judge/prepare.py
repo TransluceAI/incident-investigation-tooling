@@ -221,16 +221,16 @@ def prepare(data_root, out, count, window_tokens, config_template, with_controls
     if not items:
         write_jsonl(out / "gaps.jsonl", gaps)
         raise ValueError("No judgeable records found; refusing an empty corpus run")
-    coverage, n_windows = [], 0
+    coverage, n_windows, heaviest = [], 0, {}
     with jsonl_stream(out / "windows.jsonl") as put_window, jsonl_stream(out / "requests.jsonl") as put_request:
         for item in items:
             n_windows += _prepare_item(item, corpus, gaps, config, count, window_tokens,
-                                       put_window, put_request, coverage)
+                                       put_window, put_request, coverage, heaviest=heaviest)
         if with_controls:
             for item, bodies, _, _ in controls.control_items():
                 items.append(item)
                 n_windows += _prepare_item(item, corpus, gaps, config, count, window_tokens,
-                                           put_window, put_request, coverage, bodies)
+                                           put_window, put_request, coverage, bodies, heaviest=heaviest)
     item_rows = [{**{k: v for k, v in i.items() if k not in ("kinds", "time_basis")},
                   "kinds": sorted(i["kinds"]), "time_basis": sorted(i["time_basis"]),
                   "text_sha256s": sorted({d[1] or corpus.hashes.get(d[0]) for d in i["documents"]
@@ -294,7 +294,7 @@ def write_shards(out, shards):
 
 
 def _prepare_item(item, corpus, gaps, config, count, window_tokens, put_window, put_request, coverage,
-                  bodies=None):
+                  bodies=None, heaviest=None):
     """Write one item's windows; return how many were written."""
     if item.get("integrity") == "excluded":
         bodies = None
@@ -306,9 +306,16 @@ def _prepare_item(item, corpus, gaps, config, count, window_tokens, put_window, 
     if item["shape"] == "text" and bodies:
         item["shape"] = shapes.shape_for(sorted(item["kinds"])[0], bodies[0][1], source=item["source"])
     segs = shapes.build_segments(controls.prompt_item(item), bodies)
+    shape = item["shape"]
+    heaviest = {} if heaviest is None else heaviest
+    if shape not in heaviest:
+        # Everything before the axis policy is identical across the three axes
+        # (prompts.messages), so the axis with the longest policy and format bounds
+        # the other two. One probe per shape replaces three counts per candidate.
+        heaviest[shape] = max(AXES, key=lambda axis: count(messages(config, shape, axis, "")))
 
-    def measure(text, shape=item["shape"]):
-        return max(count(messages(config, shape, axis, text)) for axis in AXES)
+    def measure(text):
+        return count(messages(config, shape, heaviest[shape], text)) + 2  # tokenizer join margin
 
     ids = []
     for idx, (parts, offsets) in enumerate(windows(segs, measure, window_tokens)):
