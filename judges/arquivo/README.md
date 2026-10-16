@@ -17,7 +17,6 @@ scripts/inference_runner.py
                         Shared vLLM inference runner
 scripts/run.sbatch      Portable Slurm launcher for those eight shards
 examples/corpus/        Small synthetic export illustrating the input format
-docs/run-results.md     Recorded results and external artifact location
 ```
 
 The judge uses `config/rubric.txt` and `config/schema.json` with the existing shared vLLM inference runner. The Slurm launcher accepts user-supplied paths.
@@ -112,8 +111,5 @@ Supported kinds:
 
 Records may also carry `scope`, `time_basis`, and `raw_path` provenance. Malformed or unsupported observations are recorded as gaps. See `examples/corpus/` for a synthetic index and response body; it illustrates the format, not judge accuracy.
 
-## Recorded results
 
-The judge processed 7,926 events across 8,198 windows, with 8,175 validated results and 23 validation exceptions. Event assessments included 117 likely and 313 possible candidates, plus one additional unverified positive in the review queue. Accuracy has not been calibrated against an independent human-labeled set.
-
-See [recorded results and artifact access](docs/run-results.md). The corpus, model weights, raw outputs, and reports are hosted outside this repository; cluster access is required for the recorded run artifacts.
+Keep corpus files, model weights, raw outputs, and reports outside this repository.
