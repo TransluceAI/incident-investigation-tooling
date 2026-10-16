@@ -7,6 +7,7 @@ import argparse
 import contextlib
 from datetime import datetime, timezone
 import fcntl
+import functools
 import hashlib
 import json
 import math
@@ -134,6 +135,7 @@ def units(path, limit=None):
 
 
 def committed(directory, identity):
+    """Committed units, reduced to what resume and summaries need (see slim)."""
     rows = {}
     for part in sorted(directory.glob('part-*.jsonl')):
         with part.open(encoding='utf-8') as stream:
@@ -143,8 +145,15 @@ def committed(directory, identity):
                     raise ValueError(f'Run mismatch: {part}')
                 if row['unit_id'] in rows:
                     raise ValueError(f'Duplicate committed ID: {row["unit_id"]}')
-                rows[row['unit_id']] = row
+                rows[row['unit_id']] = slim(row)
     return rows
+
+
+def slim(row):
+    """The committed row stays on disk; keep its fingerprint, status and token counts,
+    not its reasoning, raw output or logprobs, so memory does not grow with output."""
+    return {'fingerprint': fingerprint(row), 'status': row['status'], 'tokens': token_counts(row),
+            'retry_tokens': [a['output_tokens'] for a in earlier_attempts(row)]}
 
 
 def messages(row, config):
@@ -394,7 +403,7 @@ def batches(rows, tokenizer, config, skip):
     batch, count = [], 0
     for row in rows:
         if row['unit_id'] in skip:
-            if fingerprint(row) != fingerprint(skip[row['unit_id']]):
+            if fingerprint(row) != skip[row['unit_id']]['fingerprint']:
                 raise ValueError('Committed input hash does not match input')
             continue
         chat = messages(row, config)
@@ -431,8 +440,9 @@ def token_counts(row):
     return row['input_tokens'], row['output_tokens'], row['reasoning_tokens'], row['final_tokens']
 
 
-def token_totals(rows):
-    counts = [token_counts(r) for r in rows]
+def token_totals(counts):
+    """Totals over (input, output, reasoning, final) token tuples from token_counts."""
+    counts = list(counts)
     return {'input_tokens': sum(c[0] for c in counts), 'output_tokens': sum(c[1] for c in counts),
             'reasoning_tokens': sum(c[2] or 0 for c in counts), 'final_tokens': sum(c[3] or 0 for c in counts),
             'unclassified_tokens': sum(c[1] for c in counts if c[2] is None)}
@@ -493,16 +503,17 @@ def run(resources):
     directory.mkdir(parents=True, exist_ok=True)
     from transformers import AutoTokenizer
     from jsonschema import Draft202012Validator
-    validators = {}
+
+    @functools.lru_cache(maxsize=4096)
+    def compiled(key):
+        schema = json.loads(key)
+        Draft202012Validator.check_schema(schema)
+        return Draft202012Validator(schema)
 
     def validator_for(row):
-        # Requests may share or differ in schema; compile each distinct one once.
-        schema = row_schema(row, config)
-        key = json.dumps(schema, sort_keys=True)
-        if key not in validators:
-            Draft202012Validator.check_schema(schema)
-            validators[key] = Draft202012Validator(schema)
-        return validators[key]
+        # Requests may share or differ in schema; recently used ones stay compiled,
+        # bounded so per-window schemas cannot grow the cache with the manifest.
+        return compiled(json.dumps(row_schema(row, config), sort_keys=True))
 
     if 'schema' in config:
         validator_for(None)
@@ -538,7 +549,7 @@ def run(resources):
     if not set(done).issubset(input_info):
         raise ValueError('Committed IDs outside selected manifest')
     for key, row in done.items():
-        if fingerprint(row) != input_info[key]:
+        if row['fingerprint'] != input_info[key]:
             raise ValueError('Committed/input hash mismatch')
     stopping = False
 
@@ -679,12 +690,12 @@ def run(resources):
             if part.exists():
                 raise RuntimeError('Refusing to overwrite committed part')
             atomic_write(part, ''.join(json.dumps(r, ensure_ascii=False)+'\n' for r in results))
-            done.update({r['unit_id']: r for r in results})
+            done.update({r['unit_id']: slim(r) for r in results})
             metrics = metrics_snapshot(llm)
             progress = {'utc': now(), 'committed': len(done), 'expected': len(input_info),
                         'failed': sum(r['status'] != 'success' for r in done.values()),
                         'batch_units': len(batch), 'batch_seconds': time.monotonic()-begin,
-                        **{f'batch_{k}': v for k, v in token_totals(results).items()},
+                        **{f'batch_{k}': v for k, v in token_totals(map(token_counts, results)).items()},
                         'metrics': metrics}
             if controls['attempts'] > 1:
                 progress['batch_retried_units'] = sum(bool(earlier_attempts(r)) for r in results)
@@ -700,14 +711,13 @@ def run(resources):
              'committed': len(done), 'unfinished': len(input_info)-len(done),
              'failed': sum(r['status'] != 'success' for r in done.values()),
              'enable_thinking': enabled,
-             **{k: v for k, v in token_totals(done.values()).items() if k != 'input_tokens'},
+             **{k: v for k, v in token_totals(r['tokens'] for r in done.values()).items() if k != 'input_tokens'},
              'session_seconds': time.monotonic()-started,
              'metrics': metrics_snapshot(llm) if llm else None}
     if controls['attempts'] > 1:
         # Committed output_tokens count final attempts only; earlier attempts are listed here.
-        final['retried_units'] = sum(bool(earlier_attempts(r)) for r in done.values())
-        final['retry_output_tokens'] = sum(a['output_tokens'] for r in done.values()
-                                           for a in earlier_attempts(r))
+        final['retried_units'] = sum(bool(r['retry_tokens']) for r in done.values())
+        final['retry_output_tokens'] = sum(sum(r['retry_tokens']) for r in done.values())
     write_json(directory / 'summary.json', final)
     print(json.dumps({'event': 'finished', **final}), flush=True)
     if final['unfinished'] or final['failed']:

@@ -50,10 +50,13 @@ class RecoveryTests(unittest.TestCase):
             list(r.units(p))
 
     def test_interrupted_part_and_duplicate_detection(self):
-        row = {**self.row, 'run_identity': 'run-a'}
+        row = {**self.row, 'run_identity': 'run-a', 'status': 'success', 'input_tokens': 3,
+               'output_tokens': 2, 'reasoning_tokens': 0, 'final_tokens': 2}
         r.atomic_write(self.root/'part-000000.jsonl', json.dumps(row)+'\n')
         (self.root/'part-000001.jsonl.tmp').write_text('{incomplete')
         self.assertEqual(list(r.committed(self.root,'run-a')),['unit-1'])
+        # Resume state is a slim record; the full row (reasoning, logprobs) stays on disk.
+        self.assertEqual(set(r.committed(self.root,'run-a')['unit-1']), {'fingerprint','status','tokens','retry_tokens'})
         with self.assertRaises(ValueError):
             r.committed(self.root,'run-b')
         r.atomic_write(self.root/'part-000001.jsonl', json.dumps(row)+'\n')
@@ -65,7 +68,7 @@ class RecoveryTests(unittest.TestCase):
              'sampling':{'max_tokens':10},'engine':{'max_model_len':1000},
              'host_batch_tokens':1000,'host_batch_records':2}
         rows=[{**self.row,'unit_id':str(i)} for i in range(5)]
-        batches=list(r.batches(iter(rows),FakeTokenizer(),cfg,{'0':rows[0]}))
+        batches=list(r.batches(iter(rows),FakeTokenizer(),cfg,{'0':{'fingerprint':r.fingerprint(rows[0])}}))
         self.assertEqual([len(b) for b in batches],[2,2])
         cfg['engine']['max_model_len']=10
         with self.assertRaises(ValueError):

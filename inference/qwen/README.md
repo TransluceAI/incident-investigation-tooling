@@ -140,7 +140,7 @@ Each line is a self-contained chat request:
 - `custom_id`: unique, nonempty string. Results are keyed by it; never rely on line order.
 - `body.messages`: nonempty list of `{role, content}` with role `system`, `user` or `assistant`.
 - `body.response_format`: optional JSON Schema for this request. Without it the
-  config's `schema` applies. Each distinct schema is checked and compiled once.
+  config's `schema` applies. Validators use a bounded cache of 4,096 schemas.
 - `body.logprobs` / `body.top_logprobs`: optional; `top_logprobs` (0–20) requires
   `logprobs: true`.
 - Optional `method: "POST"` and `url: "/v1/chat/completions"` are accepted.
@@ -258,8 +258,9 @@ vLLM schedules requests within each worker. `host_batch_records` and
 `host_batch_tokens` control checkpoint size and host memory; `max_num_seqs`
 controls GPU request concurrency. A larger host batch amortizes overhead but
 increases recomputation after interruption. Balance shards by expected token work and keep requests with
-shared prompt prefixes adjacent to improve prefix-cache reuse. Resume retains
-committed row metadata and outputs in memory, so very large workloads should use bounded shards.
+shared prompt prefixes adjacent to improve prefix-cache reuse. Resume keeps
+compact per-unit hashes, status and token counts in memory; full outputs stay
+on disk. Use bounded shards for very large workloads.
 
 Tensor, pipeline and data parallel sizes must each be 1 for this launcher.
 
