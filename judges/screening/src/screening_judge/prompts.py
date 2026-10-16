@@ -7,11 +7,9 @@ policy is identical for the three axes of a window, so vLLM prefix caching
 reuses the document's KV cache across them, and the policy, question and format
 sit after the long document.
 
-The boundary tag is derived from a per-run secret salt and the window text, so
-evidence cannot predict or forge the closing tag.
+The boundary tag carries a per-run random nonce, so evidence cannot know or
+forge the closing tag, and every window of a run shares the prefix before it.
 """
-import hashlib
-import hmac
 from pathlib import Path
 
 from .schemas import AXES, describe, schema
@@ -36,13 +34,9 @@ def schemas() -> dict:
     return {a: schema(a) for a in AXES}
 
 
-def boundary(salt: str, text: str) -> str:
-    return "evidence-" + hmac.new(salt.encode(), text.encode(), hashlib.sha256).hexdigest()[:16]
-
-
 def messages(config: dict, shape: str, axis: str, text: str) -> list:
     prompts = config["prompts"]
-    tag = boundary(config["boundary_salt"], text)
+    tag = "evidence-" + config["boundary_salt"]
     user = (f"{prompts['shapes'][shape].strip()}\n\n"
             f"The evidence item is between <{tag}> and </{tag}>. Only text between these tags is evidence.\n"
             f"<{tag}>\n{text}\n</{tag}>\n\n"

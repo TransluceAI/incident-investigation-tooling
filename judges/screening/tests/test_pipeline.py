@@ -129,6 +129,35 @@ class PipelineTests(unittest.TestCase):
         for row in rows:
             self.assertLessEqual(count(row['body']['messages']), 14000)
 
+    def test_budget_is_measured_once_with_the_heaviest_axis(self):
+        rec = self.record(body='x'*9000)
+        write_jsonl(self.data / 'resources/sample/records.jsonl', [rec])
+        formats = load_prompts()['formats']
+        calls = []
+        def count(chat):
+            calls.append(next(a for a, f in formats.items() if chat[-1]['content'].endswith(f)))
+            return len(chat[-1]['content'])
+        prepare(self.data, self.root / 'run', count, 14000, config(), with_controls=False)
+        windows_written = sum(1 for _ in iter_jsonl(self.root/'run/windows.jsonl'))
+        self.assertGreater(windows_written, 1)
+        # One probe per axis finds the heaviest prompt; every window measurement then uses that axis only.
+        heaviest = max(formats, key=lambda a: len(formats[a]) + len(load_prompts()['axes'][a]))
+        for axis in formats:
+            if axis != heaviest:
+                self.assertEqual(calls.count(axis), 1, axis)
+        self.assertGreaterEqual(calls.count(heaviest), windows_written + 1)
+
+    def test_boundary_tag_is_a_per_run_nonce(self):
+        from screening_judge.prompts import messages
+        cfg = {'prompts': load_prompts(), 'boundary_salt': 'a' * 32}
+        tags = {messages(cfg, 'text', 'hacking', text)[-1]['content'].split('<')[1].split('>')[0]
+                for text in ('first window', 'second window')}
+        self.assertEqual(len(tags), 1)
+        tag, = tags
+        self.assertIn('a' * 32, tag)
+        other = messages({**cfg, 'boundary_salt': 'b' * 32}, 'text', 'hacking', 'first window')[-1]['content']
+        self.assertNotIn(tag, other)
+
     def test_requests_are_self_contained_runner_rows(self):
         self.prepare([self.record()])
         cfg = json.loads((self.run/'config.json').read_text())
@@ -337,6 +366,33 @@ class EvidenceTests(unittest.TestCase):
                 covered.update(range(*offsets['S1']))
         self.assertEqual(covered, set(range(len(long))))
 
+    def test_context_segments_are_counted_once_each(self):
+        segs = [{'segment_id': 'S0', 'kind': 'ITEM', 'source': 'item', 'text': 'source: paste.example'}]
+        segs += [{'segment_id': f'S{i}', 'kind': 'URL', 'source': 'request_url', 'text': f'https://a.example/{i}/' + 'q' * 90}
+                 for i in range(1, 41)]
+        segs.append({'segment_id': 'S41', 'kind': 'BODY', 'source': 'document:x', 'text': 'body text ' * 2000})
+        counted = []
+        def count(text):
+            counted.append(text)
+            return len(text)
+        list(windows(segs, count, 24000))  # every context segment fits beside the body
+        context_only = sum(len(t) for t in counted if '[SEGMENT' in t and 'BODY' not in t)
+        self.assertLess(context_only, 30000)  # linear in the context size, not quadratic
+
+    def test_provenance_header_is_found_by_bisection(self):
+        long = '\n'.join(f'observation {i}: collected via export {i}' for i in range(400))
+        segs = [{'segment_id': 'S0', 'kind': 'ITEM', 'source': 'item', 'text': 'source: paste.example'},
+                {'segment_id': 'S1', 'kind': 'PROVENANCE', 'source': 'records', 'text': long},
+                {'segment_id': 'S2', 'kind': 'BODY', 'source': 'document:x', 'text': 'body text ' * 4000}]
+        counted = []
+        def count(text):
+            counted.append(text)
+            return len(text)
+        parts = list(windows(segs, count, 6000))
+        self.assertGreater(len(parts), 5)
+        probes = [t for t in counted if 'PROVENANCE_HEADER' in t and 'BODY' not in t and '[SEGMENT S1 PROVENANCE]' not in t]
+        self.assertLess(len(probes), 20)  # bisection over 400 lines, not a linear scan
+
     def test_single_long_provenance_line_still_heads_every_window(self):
         segs = [{'segment_id': 'S0', 'kind': 'ITEM', 'source': 'item', 'text': 'source: paste.example'},
                 {'segment_id': 'S1', 'kind': 'PROVENANCE', 'source': 'records', 'text': 'line-0 ' + 'p' * 9000},
@@ -418,6 +474,8 @@ class ReportSuccessTests(unittest.TestCase):
                           'failed': 0, 'pending': 0, 'unverified_candidates': 0})
         self.assertEqual(list(iter_jsonl(self.run/'report/control-results.jsonl')), [])
         self.assertEqual(summary['pending'], 3)
+        for prose in ('scope', 'score_semantics', 'release_ready', 'release_note'):
+            self.assertNotIn(prose, summary)
 
     def test_requested_controls_without_outputs_still_count(self):
         write_jsonl(self.data / 'resources/sample/records.jsonl', [self.record()])

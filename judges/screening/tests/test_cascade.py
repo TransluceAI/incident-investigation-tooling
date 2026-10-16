@@ -242,7 +242,7 @@ class CascadeTests(unittest.TestCase):
         self.assertEqual([(q['pass'], q['queue_reason']) for q in queued], [(2, 'unverified_positive')])
         self.assertEqual((summary['pass2_failed'], summary['pass2_unresolved_queued']), (1, 1))
         # Six audited requests; the failed one is not counted among validated audit answers.
-        self.assertEqual(summary['audit'], {'audited': 5, 'pass2_positive': 0, 'note': summary['audit']['note']})
+        self.assertEqual(summary['audit'], {'audited': 5, 'pass2_positive': 0})
 
     def test_pending_pass1_is_preserved_when_combining(self):
         outcomes = self.outcomes()

@@ -188,13 +188,7 @@ def evaluate(item_results_path, key_path, out_path=None, include_test=False):
     by_hash = predictions(results)
     key = validated_key(key_path)
     report = {"key_rows": len(key), "partitions": dict(Counter(partition(r) for r in key)), "axes": {},
-              "test_evaluated": include_test,
-              "historical_holdout_independence": "unverified",
-              "split_protocol": "Reserved partitions do not establish independence from earlier tuning.",
-              "notes": ["Conditional rates exclude missing, ambiguous and undecided predictions; read coverage too.",
-                        "Overall means any of the three axes, not hacking alone.",
-                        "Projection assumes measured rates transfer to the stated prevalence and decided population.",
-                        "Hash joins with multiple event contexts are ambiguous unless the key provides item_id."]}
+              "test_evaluated": include_test}
     targets = [("overall", None)] + [(a, KEY_AXIS[a]) for a in AXES]
     for name, key_axis in targets:
         per_part = {}

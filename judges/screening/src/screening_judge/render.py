@@ -77,15 +77,19 @@ def provenance_header(segment, fixed, count, limit):
     def fits(candidate):
         return count(render_citable(fixed + [candidate])[0]) < limit
 
-    best = None
-    for n in range(1, len(lines)):
-        candidate = header("\n".join(lines[:n] + [
+    def leading(n):
+        return header("\n".join(lines[:n] + [
             f"[{len(lines) - n} further provenance lines are in the windows of segment {sid}]"]))
-        if not fits(candidate):
-            break
-        best = candidate
-    if best is not None:
-        return best
+
+    lo, hi = 0, len(lines) - 1  # most leading whole lines that fit; lo is always a measured fit
+    while lo < hi:
+        mid = (lo + hi + 1) // 2
+        if fits(leading(mid)):
+            lo = mid
+        else:
+            hi = mid - 1
+    if lo:
+        return leading(lo)
     note = f"\n[provenance continues in the windows of segment {sid}]"
     lo, hi = 0, len(lines[0])  # longest first-line prefix that fits
     while lo < hi:
@@ -113,12 +117,17 @@ def windows(segments, count, budget, overlap=2000):
     # third of the room left after that overhead, not a third of the whole budget.
     overhead = count(render_citable([])[0])
     limit = overhead + max(budget - overhead, 0) // 3
-    fixed, variable = [], []
+    fixed, variable, fixed_tokens = [], [], overhead
     for s in segments:
-        if s["kind"] not in BULK_KINDS and count(render_citable(fixed + [s])[0]) < limit:
+        # Each context segment is counted once on its own; a join adds at most a token.
+        alone = None if s["kind"] in BULK_KINDS else count(render_citable([s])[0]) - overhead
+        if alone is not None and fixed_tokens + alone + 1 < limit:
             fixed.append(s)
+            fixed_tokens += alone + 1
         else:
             variable.append(s)
+    while fixed and count(render_citable(fixed)[0]) >= limit:
+        variable.insert(0, fixed.pop())  # one exact check; trims only on tokenizer join effects
     for s in [v for v in variable if v["kind"] == "PROVENANCE"]:
         # Provenance too long to repeat whole is windowed like a body; every window
         # still carries its leading lines so no body window loses its provenance.

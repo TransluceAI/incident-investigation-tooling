@@ -207,9 +207,7 @@ def combine(pass1_report, pass2_run, pass2_report, out, allow_pending=False):
                "controls": {"requests": len(controls),
                             "pass1_pending": sum(c.get("pass1_pending", False) for c in controls),
                             "pass2_pending": sum(c.get("pass2_pending", False) for c in controls)},
-               "audit": {**dict(audit), "note": "Counts audited pass-1 negatives that pass 2 validated, and how many "
-                                                "of those pass 2 answered yes. Observed flips only: not an estimate "
-                                                "of total misses or recall."},
+               "audit": dict(audit),
                "selection": preparation["selection"]}
     atomic_write_text(out / "summary.json", json.dumps(summary, indent=2) + "\n")
     return summary

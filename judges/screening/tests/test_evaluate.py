@@ -55,6 +55,8 @@ class EvaluationTests(unittest.TestCase):
         self.assertAlmostEqual(dev['coverage'],1/3)
         self.assertAlmostEqual(dev['end_to_end_positive_recall'],1/3)
         self.assertEqual(report['axes']['hacking']['dev']['unlabeled'],3)
+        for prose in ('notes','split_protocol','historical_holdout_independence'):
+            self.assertNotIn(prose,report)
 
     def test_unrecognized_partition_rejected(self):
         with self.assertRaisesRegex(ValueError,'partition'):
