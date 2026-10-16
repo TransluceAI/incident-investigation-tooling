@@ -8,9 +8,11 @@ never a label.
 A full-corpus scan (2026-10-16) found every true positive in request or CDX
 URLs and their decoded views or programs, while body text produced the noise
 (JavaScript localhost ports, wiki links to :8080, Suricata "TLS SNI" alerts,
-reCAPTCHA site keys, urlscan hostname lists). So the rules read only the
-window's non-body segments, except the precise dav/versions path. They are not
-yet measured against labelled data.
+reCAPTCHA site keys, urlscan hostname lists). So the rules read only request
+context: segments that neither are a body nor were derived from one (URLs found
+in a body are decoded into URL_DECODED, NESTED_URL and PROGRAM segments whose
+source names the document). The precise dav/versions path is read everywhere.
+The rules are not yet measured against labelled data.
 """
 import re
 
@@ -24,11 +26,18 @@ CAPTCHA_ENDPOINT = re.compile(r"(?i)captcha")
 OCR_API = re.compile(r"(?i)ocr\.space|tesseract")
 
 
+def from_body(source):
+    """Body segments and views derived from body text: 'document:<path>...' or 'body_url'."""
+    return source.startswith("document:") or source == "body_url"
+
+
 def context_segments(window):
-    """Text of each non-body segment of a prepared window (URLs, decodings, programs, provenance)."""
+    """Text of a prepared window's request-context segments: request URLs, their
+    decodings and programs, item metadata, provenance and CDX lines."""
     text = window["text"]
     return [text[a:b] for sid, (a, b) in window["segment_spans"].items()
-            if window["segment_kinds"].get(sid) not in BULK_KINDS]
+            if window["segment_kinds"].get(sid) not in BULK_KINDS
+            and not from_body(window["segment_sources"].get(sid, "document:"))]
 
 
 def hits(window) -> list:

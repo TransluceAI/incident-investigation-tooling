@@ -17,10 +17,14 @@ def window(**segments):
     segs = [{'segment_id': f'S{i}', 'kind': kind, 'source': 'test', 'text': text}
             for i, (kind, text) in enumerate(segments.items())]
     text, spans, _ = render_citable(segs)
-    return {'text': text, 'segment_spans': spans, 'segment_kinds': {s['segment_id']: s['kind'] for s in segs}}
+    return {'text': text, 'segment_spans': spans, 'segment_kinds': {s['segment_id']: s['kind'] for s in segs},
+            'segment_sources': {s['segment_id']: s['source'] for s in segs}}
 
 
 class RuleTests(unittest.TestCase):
+    setUp = tp.PipelineTests.setUp
+    record = tp.PipelineTests.record
+
     def test_rules_read_request_context_not_bodies(self):
         cases = {
             'backend_port': ('http://lib.example.edu:8089/repositories/2', 'https://a.example:443/ http://b.example/'),
@@ -42,6 +46,24 @@ class RuleTests(unittest.TestCase):
         self.assertIn('backend_port', rules.hits(window(PROVENANCE=cdx, BODY='text')))
         split = window(URL_DECODED='https://site.example/getcaptcha', PROGRAM='tesseract image.png')
         self.assertNotIn('captcha_ocr_chain', rules.hits(split))
+
+    def test_urls_decoded_from_bodies_do_not_fire_through_real_preparation(self):
+        from screening_judge.common import write_jsonl
+        from screening_judge.prepare import prepare
+        body_link = self.record('paste', 'see https://share.example/go?url=http%3A%2F%2Flocalhost%3A8080%2Fapp')
+        capture = self.record('capture', 'Not Found', kind='wayback_capture',
+                              metadata={'original_url': 'http://lib.example.edu:8089/repositories/2',
+                                        'capture_timestamp': '20260601000000'})
+        write_jsonl(self.data/'resources/sample/records.jsonl', [body_link, capture])
+        prepare(self.data, self.root/'run', lambda chat: sum(len(m['content']) for m in chat), 15000, config(),
+                with_controls=False)
+        fired = {next(i['observations'][0]['observation_id'] for i in iter_jsonl(self.root/'run/items.jsonl')
+                      if i['item_id'] == w['item_id']): rules.hits(w)
+                 for w in iter_jsonl(self.root/'run/windows.jsonl')}
+        windows = list(iter_jsonl(self.root/'run/windows.jsonl'))
+        paste = next(w for w in windows if 'localhost%3A8080' in w['text'])
+        self.assertTrue(any(k in ('URL_DECODED', 'NESTED_URL') for k in paste['segment_kinds'].values()))
+        self.assertEqual(fired, {'paste': [], 'capture': ['backend_port']})
 
     def test_dav_versions_is_precise_enough_to_read_everywhere(self):
         self.assertIn('file_version_path', rules.hits(window(BODY='PROPFIND /remote.php/dav/versions/u/versions/1')))
@@ -192,6 +214,19 @@ class CascadeTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'pass-1'):
             cascade.escalate(a, a/'report', self.root/'again', THINKING)
         cascade.combine(self.run/'report', a, a/'report', self.root/'ok')
+
+    def test_pass2_has_its_own_calibration_identity(self):
+        self.pass1(self.outcomes())
+        first = json.loads((self.run/'preparation.json').read_text())['classifier_sha256']
+        a = cascade.escalate(self.run, self.run/'report', self.root/'a', THINKING, audit_rate=1.0)
+        b = cascade.escalate(self.run, self.run/'report', self.root/'b',
+                             {**THINKING, 'model': '/path/to/another-model'}, audit_rate=1.0)
+        self.assertEqual(len({first, a['classifier_sha256'], b['classifier_sha256']}), 3)
+        # Thresholds fitted on pass 1 are refused for pass 2.
+        with self.assertRaisesRegex(ValueError, 'Threshold config'):
+            reconcile(self.root/'a', [], thresholds={'classifier_sha256': first, 'axes': {}})
+        reconcile(self.root/'a', [], thresholds={'classifier_sha256': a['classifier_sha256'],
+                                                 'inference_sha256': None, 'axes': {}})
 
     def test_unresolved_pass2_answers_stay_in_the_queue(self):
         self.pass1(self.outcomes())
