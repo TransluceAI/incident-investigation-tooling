@@ -72,7 +72,7 @@ def escalate(run, report, out, engine_template, borderline=(0.2, 0.8), audit_rat
     reasons = defaultdict(list)
     axes = list(json.loads((run / "config.json").read_text())["schemas"])
     for w in iter_jsonl(run / "windows.jsonl"):
-        fired = rules.hits(w["text"])
+        fired = rules.hits(w)
         for axis in axes:
             uid = f"{w['window_id']}:{axis}"
             j = judgments.get(uid)
