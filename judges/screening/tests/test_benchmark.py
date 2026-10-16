@@ -38,12 +38,14 @@ class BenchmarkTests(unittest.TestCase):
     def test_neutral_inputs_and_full_document_without_label_leakage(self):
         rows=self.inputs();summary=self.run_prepare()
         self.assertEqual(summary['items'],2)
-        units=list(iter_jsonl(self.root/'run/manifest.jsonl'))
-        for unit in units:
-            self.assertIn('Preserved public document.',unit['text'])
-            self.assertIn('wiki',unit['text'])
+        requests=list(iter_jsonl(self.root/'run/requests.jsonl'))
+        for request in requests:
+            prompt='\n'.join(m['content'] for m in request['body']['messages'])
+            self.assertIn('Preserved public document.',prompt)
+            self.assertIn('wiki',prompt)
             for secret in ('SECRET_', 'positive-case', 'positive-labelled-path', 'answer_key'):
-                self.assertNotIn(secret,unit['text'])
+                self.assertNotIn(secret,prompt)
+                self.assertNotIn(secret,request['custom_id'])
         results=reconcile(self.root/'run',[])[1]
         self.assertEqual({r['benchmark_case_id'] for r in results},{r['id'] for r in rows})
 

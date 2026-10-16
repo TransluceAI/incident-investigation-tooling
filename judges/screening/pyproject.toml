@@ -7,7 +7,6 @@ dependencies = ["jsonschema>=4.0"]
 
 [project.optional-dependencies]
 prepare = ["transformers"]
-gpu = ["transformers", "vllm"]
 
 [project.scripts]
 screening-judge = "screening_judge.pipeline:main"

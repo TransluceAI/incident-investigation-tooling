@@ -18,7 +18,8 @@ def validate(row: dict, unit: dict, schema: dict) -> list:
     from jsonschema import Draft202012Validator
     if row.get("status") != "success":
         raise ValidationError("Runner failure: " + str(row.get("error"))[:300])
-    if row.get("text_sha256") != unit["text_sha256"] or sha256_text(unit["text"]) != unit["text_sha256"]:
+    # The row's request hash binds it to this window's prepared request (report.py).
+    if sha256_text(unit["text"]) != unit["text_sha256"]:
         raise ValidationError("Input hash mismatch")
     result = row.get("result")
     errors = sorted(Draft202012Validator(schema).iter_errors(result), key=lambda e: e.path)

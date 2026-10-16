@@ -1,4 +1,5 @@
 import base64
+import copy
 import gzip
 import json
 import tempfile
@@ -10,6 +11,7 @@ from unittest.mock import patch
 from screening_judge import decode, controls, shapes
 from screening_judge.common import iter_jsonl, write_jsonl, classifier_hash
 from screening_judge.prepare import prepare
+from screening_judge.prompts import load_prompts, schemas
 from screening_judge.report import reconcile
 from fixtures import build
 from test_pipeline import config
@@ -51,10 +53,12 @@ class AdapterTests(unittest.TestCase):
             self.assertEqual(set(summary['items_by_shape']),set(shapes.SHAPES))
             self.assertEqual(summary['excluded_integrity'],1)
             self.assertGreater(summary['windowed_items'],0)
-            original=list(iter_jsonl(run/'manifest.jsonl'))
-            self.assertTrue(any('NESTED_PAYLOAD_SIGNAL' in row['text'] for row in original))
+            original=list(iter_jsonl(run/'requests.jsonl'))
+            self.assertTrue(any('NESTED_PAYLOAD_SIGNAL' in row['body']['messages'][-1]['content'] for row in original))
+            self.assertEqual(sorted(p.name for p in (run/'shards').glob('*.jsonl')),
+                             ['part-0.jsonl','part-1.jsonl','part-2.jsonl'])
             sharded=[r for f in sorted((run/'shards').glob('*.jsonl')) for r in iter_jsonl(f)]
-            self.assertEqual(sorted(r['unit_id'] for r in original),sorted(r['unit_id'] for r in sharded))
+            self.assertEqual(sorted(r['custom_id'] for r in original),sorted(r['custom_id'] for r in sharded))
             parts=reconcile(run,[])
             self.assertEqual(len(parts[1]),summary['items'])
             self.assertTrue(all(a['assessment']=='incomplete' for row in parts[1] for a in row['axes'].values()))
@@ -73,7 +77,8 @@ class AdapterTests(unittest.TestCase):
             self.assertEqual(summary['excluded_integrity'],2)
 
     def test_classifier_identity_ignores_nonce_but_not_policy(self):
-        a=config();b=config();b['boundary_salt']='another-run'
+        a={**config(),'prompts':load_prompts(),'schemas':schemas(),'boundary_salt':'test'}
+        b=copy.deepcopy(a);b['boundary_salt']='another-run'
         self.assertEqual(classifier_hash(a),classifier_hash(b))
         b['prompts']['axes']['hacking']+=' changed'
         self.assertNotEqual(classifier_hash(a),classifier_hash(b))

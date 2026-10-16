@@ -12,61 +12,57 @@ This is exploratory evidence triage. Labels require human review, and source-loc
 config/core.txt         Shared evidence and attribution rules
 config/axes/            Separate hacking, agent-activity, and coordination rubrics
 config/shapes/          Guidance for each evidence format
-config/engine*.json     Engine and sampling settings templates
-src/screening_judge/    Adapters, schemas, preparation, reporting, and evaluation
-scripts/inference_runner.py
-                        Offline, resumable vLLM inference runner
+src/screening_judge/    Adapters, schemas, preparation, requests, label scores, reporting, and evaluation
 tests/                  CPU regression tests and synthetic corpus fixtures
 ```
 
-The package is `screening-judge`, its Python module is `screening_judge`, and its installed CLI is `screening-judge`. The wheel includes rubrics and example configs; run the inference script from the source checkout.
+The package is `screening-judge`, its Python module is `screening_judge`, and its installed CLI is `screening-judge`. The wheel includes the rubrics.
+
+The judge has no GPU code. Inference uses the repository's shared runner, [`inference/qwen`](../../inference/qwen/): `prepare` writes one self-contained request per (window, axis) in its [request format](../../inference/qwen/REQUESTS.md), the runner returns one result per request, and `report` validates those results and computes label scores. Engine, sampling, thinking, and decoding settings come from the runner's model profiles.
 
 ## Install
 
-Python 3.10+ is required. Reporting and evaluation run on a CPU with `jsonschema`. Exact preparation additionally needs the model tokenizer; inference needs a compatible Linux CUDA environment with vLLM and enough GPU memory for the configured model and context.
+Python 3.10+ is required. Reporting and evaluation run on a CPU with `jsonschema`. Exact preparation additionally needs the model tokenizer. Install and run inference with [`inference/qwen`](../../inference/qwen/README.md) on the cluster.
 
 ```sh
 cd judges/screening
 python -m pip install -e .              # Report and evaluate existing outputs
 python -m pip install -e '.[prepare]'   # Also prepare inputs with Transformers
-# On the GPU host, use a model-compatible vLLM environment:
-python -m pip install -e '.[gpu]'
 ```
 
-Copy `config/engine.example.json` to a local configuration outside the repository and set `model` to the absolute path of your local weights and tokenizer. The examples target Qwen 27B. The `model_revision` field records the intended snapshot; it does not verify the weights at that path.
+Pass a resolved runner profile as `--engine`, for example `inference/qwen/.runtime/config/qwen3.8-27b-fp8.json` after its model download. Its `model` must be the local model path, because preparation counts tokens with that tokenizer. The `model_revision` field records the intended snapshot; it does not verify the weights at that path. The profile's transport `system_prompt` and `schema` are not used: each request carries the judge's own prompts and per-axis schema. Preparation writes the profile's engine and sampling settings to `engine.json` for the runner.
 
-The baseline disables thinking. `engine.thinking.example.json` enables it; the two `engine.vendor-*.example.json` files provide alternative sampling settings for experiments. These configurations need comparative evaluation before choosing a default. Thinking mode also requires validation of the reasoning parser and structured-output support in the installed vLLM version.
+The baseline profile disables thinking; the `thinking` and `thinking.controls` profiles enable it. Add `citation_constraints: true` to a copy of the profile and each request's schema is narrowed to the window's citable segments and chunk numbers, so constrained decoding cannot emit an unknown citation. Settings need comparative evaluation before choosing a default. `--label-logprobs K` (default 10, 0 disables) sets the logprob candidates requested for label scores.
 
 ## Prepare and run
 
-Run these commands from this tool's directory. `DATA_ROOT` must contain an export matching [the input contract](#input-format); the tool does not collect or crawl sources. Keep run artifacts outside the repository.
+Run `screening-judge` from this tool's directory and the runner commands from `inference/qwen`. `DATA_ROOT` must contain an export matching [the input contract](#input-format); the tool does not collect or crawl sources. Keep run artifacts outside the repository.
 
 ```sh
 export DATA_ROOT=/absolute/path/to/exported-corpus
-export ENGINE_CONFIG=/absolute/path/to/engine.local.json
+export ENGINE_CONFIG=/absolute/path/to/inference/qwen/.runtime/config/qwen3.8-27b-fp8.json
 export RUN_ROOT=/absolute/path/to/new-screening-run
 export PREPARED_DIR="$RUN_ROOT/prepared"
-export OUTPUT_DIR="$RUN_ROOT/outputs"
 
 screening-judge prepare \
   --data-root "$DATA_ROOT" --engine "$ENGINE_CONFIG" \
   --out "$PREPARED_DIR" --window-tokens 160000 --shards 8
 
-python scripts/inference_runner.py \
-  --config "$PREPARED_DIR/config.json" \
-  --input-manifest "$PREPARED_DIR/shards/manifest-0000.jsonl" \
-  --output-dir "$OUTPUT_DIR" --worker-id 0 --validate-only
+# From inference/qwen: tokenizer preflight on one shard, then submit every shard.
+.runtime/venv/bin/python scripts/inference_runner.py \
+  --config "$PREPARED_DIR/engine.json" \
+  --input-manifest "$PREPARED_DIR/shards/part-0.jsonl" \
+  --output-dir "$RUN_ROOT/preflight" --worker-id 0 --validate-only
 
-# After validation, run inference on the same shard:
-python scripts/inference_runner.py \
-  --config "$PREPARED_DIR/config.json" \
-  --input-manifest "$PREPARED_DIR/shards/manifest-0000.jsonl" \
-  --output-dir "$OUTPUT_DIR" --worker-id 0
+.runtime/venv/bin/python scripts/submit.py \
+  --config "$PREPARED_DIR/engine.json" --shard-dir "$PREPARED_DIR/shards" \
+  --run-dir "$RUN_ROOT/inference" --gpus 8 --time 04:00:00
+export OUTPUT_DIR="$RUN_ROOT/inference/outputs"
 ```
 
-These runner commands cover shard 0 only. Run each remaining shard with its own worker ID to complete the corpus. `--shards` controls the shard count; each worker currently expects exactly one visible CUDA device. For one worker, prepare with `--shards 1` and use `$PREPARED_DIR/manifest.jsonl` directly. Synthetic controls are included by default and stay separate from corpus item counts.
+`--shards` controls the shard count. Shards are named `part-N.jsonl` for the launcher's `--shard-dir`; a window's three axis requests stay together and adjacent so they share the prefix cache. For one worker, prepare with `--shards 1` and submit `$PREPARED_DIR/requests.jsonl` with `--manifest`. Synthetic controls are included by default and stay separate from corpus item counts.
 
-Use a fresh preparation directory for each experiment. Add `--resume` only after the previous worker exits and with identical configuration, manifest, and runner code. Resume skips committed failures as well as successes; it does not retry them. The runner counts prompt tokens and rejects oversized inputs rather than truncating them. Unclosed reasoning blocks and length-limited answers are failures.
+Use a fresh preparation directory for each experiment. See the runner README for resume, deadlines, and decoding controls. The runner counts prompt tokens and rejects oversized requests rather than truncating them. Unclosed reasoning blocks, length-limited answers and schema-invalid answers are failures.
 
 For CPU-only preparation without a tokenizer, add `--estimate-tokens 4` to the preparation command. This is a layout smoke test with estimated token counts, not validation of model compatibility or context limits.
 
@@ -88,9 +84,9 @@ screening-judge report \
 - `near-misses.jsonl`, `injection-review.jsonl`: additional candidates for review.
 - `control-results.jsonl`: synthetic controls, excluded from corpus item counts. Request totals include controls.
 
-Reports check prepared artifact hashes, worker configuration, and membership in each worker's selected manifest. Positive judgments require schema validity and resolved citations; action references must cite resolved evidence. The model's free-text `location` is unverified. Archive replay responses cannot establish attack success.
+Reports check prepared artifact hashes, worker configuration against `engine.json`, membership in each worker's selected manifest, and that each result's `request_sha256` matches its prepared request. Positive judgments require schema validity and resolved citations; action references must cite resolved evidence. The model's free-text `location` is unverified. Archive replay responses cannot establish attack success.
 
-`label_probs` and `p_yes` are diagnostic first-token branch scores, not calibrated probabilities. Incomplete logprobs produce no score. Optional `--thresholds /path/to/thresholds.json` applies exploratory development-set ranking bands to already verified positives; it never promotes negative or abstaining judgments. Bands are bound to the classifier and inference implementation. Without applicable bands, positives remain `positive_uncalibrated`.
+`label_probs` and `p_yes` are diagnostic first-token branch scores, not calibrated probabilities. The report computes them from the runner's raw final-answer logprobs; incomplete logprobs produce no score. Optional `--thresholds /path/to/thresholds.json` applies exploratory development-set ranking bands to already verified positives; it never promotes negative or abstaining judgments. Bands are bound to the classifier and inference implementation. Without applicable bands, positives remain `positive_uncalibrated`.
 
 ## Tests
 
@@ -98,7 +94,7 @@ Reports check prepared artifact hashes, worker configuration, and membership in 
 PYTHONPATH=src python -m unittest discover -s tests -v
 ```
 
-The suite uses synthetic data and a simulated inference engine. It covers evidence preservation, citation resolution, worker assignment, failure and resume handling, benchmark isolation, and evaluation joins. It requires no model, GPU, or network access.
+The suite uses synthetic data and simulated runner outputs. It covers evidence preservation, request contents, citation narrowing and resolution, label scores, worker assignment, failure handling, benchmark isolation, and evaluation joins. It requires no model, GPU, or network access. `test_shared_runner.py` runs prepared requests through the shared runner with a simulated engine; it skips when `inference/qwen` is absent, and `QWEN_RUNNER=/path/to/inference_runner.py` selects another checkout.
 
 ## Input format
 
@@ -140,7 +136,7 @@ Test metrics are excluded unless explicitly requested with `evaluate --include-t
 
 ## Recorded results
 
-Local verification on 2026-10-16: **47 CPU tests pass**. The renamed package also built successfully as a wheel; its bundled policies and CLI entry point were checked from an extracted installation outside the checkout.
+Local verification on 2026-10-16: **49 CPU tests pass**, including the shared-runner contract test against the `inference/qwen` runner from the separate inference branch; without that runner the contract test is skipped. Earlier, the renamed package built successfully as a wheel; its bundled policies and CLI entry point were checked from an extracted installation outside the checkout.
 
 No actual-model accuracy or calibration results are recorded for this judge yet. GPU compatibility, injection resistance, repeatability, and full-corpus memory/throughput remain unmeasured. Windows preserve text but can separate related context; cross-document reasoning is not implemented. Arquivo experiment results do not establish this judge's performance.
 

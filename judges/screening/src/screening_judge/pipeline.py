@@ -20,7 +20,7 @@ def tokenizer_counter(config):
 
 
 def char_counter(chars_per_token):
-    """Dry-run estimate only. The runner re-counts exactly and rejects oversize units."""
+    """Dry-run estimate only. The runner re-counts exactly and rejects oversize requests."""
     if chars_per_token <= 0:
         raise ValueError("CHARS_PER_TOKEN must be positive")
     def count(chat):
@@ -38,10 +38,13 @@ def _cached(count):
 def main():
     p = argparse.ArgumentParser(prog="screening-judge")
     sub = p.add_subparsers(dest="command", required=True)
-    a = sub.add_parser("prepare", help="Build items, windows and the inference manifest")
+    a = sub.add_parser("prepare", help="Build items, windows and inference requests")
     a.add_argument("--data-root", required=True)
     a.add_argument("--benchmark-manifest", help="Neutral inputs.jsonl relative to data root; never reads answer_key.jsonl")
-    a.add_argument("--engine", required=True, help="Engine/sampling settings JSON (see config/)")
+    a.add_argument("--engine", required=True,
+                   help="Resolved inference/qwen runner profile (local model path, engine and sampling)")
+    a.add_argument("--label-logprobs", type=int, default=10, metavar="K",
+                   help="Logprob candidates per token for label scores (0 disables; default 10)")
     a.add_argument("--out", required=True)
     a.add_argument("--window-tokens", type=int, default=160_000)
     a.add_argument("--estimate-tokens", type=int, metavar="CHARS_PER_TOKEN",
@@ -74,7 +77,7 @@ def main():
         count = char_counter(args.estimate_tokens) if args.estimate_tokens is not None else tokenizer_counter(engine)
         summary = prepare(args.data_root, args.out, count, args.window_tokens, engine,
                           with_controls=not args.no_controls, shards=args.shards,
-                          benchmark_manifest=args.benchmark_manifest)
+                          benchmark_manifest=args.benchmark_manifest, label_logprobs=args.label_logprobs)
         if args.estimate_tokens:
             summary["token_counts"] = f"estimated at {args.estimate_tokens} characters per token"
         print(json.dumps(summary, indent=2))

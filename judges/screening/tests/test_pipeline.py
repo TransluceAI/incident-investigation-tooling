@@ -1,10 +1,12 @@
+import copy
 import json
+import math
 import tempfile
 import unittest
 from pathlib import Path
 
 from screening_judge import controls, records, scanner
-from screening_judge.common import sha256_text, write_jsonl, iter_jsonl
+from screening_judge.common import request_sha256, sha256_text, write_jsonl, iter_jsonl
 from screening_judge.prepare import prepare
 from screening_judge.prompts import load_prompts, schemas
 from screening_judge.render import render_citable, windows, validate_chunk_map
@@ -12,11 +14,26 @@ from screening_judge.report import reconcile, write_report
 from screening_judge.validate import validate, ValidationError
 
 ROOT = Path(__file__).resolve().parents[1]
+# A resolved inference/qwen runner profile (the judge no longer ships engine configs).
+ENGINE = {
+    'model': '/path/to/local/Qwen3.8-27B-FP8',
+    'model_revision': '017b9c7af6b5689d5dd426a76e0bc077eb5ca20a',
+    'engine': {'tensor_parallel_size': 1, 'max_model_len': 262144, 'max_num_seqs': 16,
+               'enable_prefix_caching': True, 'seed': 17},
+    'sampling': {'temperature': 0, 'max_tokens': 2048},
+    'chat_template_kwargs': {'enable_thinking': False},
+    'host_batch_records': 32, 'host_batch_tokens': 400000,
+}
 
 
 def config():
-    return {**json.loads((ROOT / 'config/engine.example.json').read_text()),
-            'prompts': load_prompts(), 'schemas': schemas(), 'boundary_salt': 'test'}
+    return copy.deepcopy(ENGINE)
+
+
+def answered(run, uid):
+    """The runner's request fields for one prepared request."""
+    body = next(r['body'] for r in iter_jsonl(run / 'requests.jsonl') if r['custom_id'] == uid)
+    return {'unit_id': uid, 'custom_id': uid, 'request_sha256': request_sha256(body)}
 
 
 def result(axis, label='no'):
@@ -33,9 +50,9 @@ def result(axis, label='no'):
 
 def write_worker(run, rows, cfg=None):
     from screening_judge.common import sha256_file
-    cfg = cfg or json.loads((run / 'config.json').read_text())
-    ident = {'config': cfg, 'manifest_hash': sha256_file(run / 'manifest.jsonl'),
-             'runner_hash': 'test-runner', 'prompts_hash': 'test-prompts', 'max_records': None}
+    cfg = cfg or json.loads((run / 'engine.json').read_text())
+    ident = {'config': cfg, 'manifest_hash': sha256_file(run / 'requests.jsonl'),
+             'runner_hash': 'test-runner', 'max_records': None}
     digest = sha256_text(json.dumps(ident, sort_keys=True))
     worker = run / 'outputs/worker-0'
     worker.mkdir(parents=True, exist_ok=True)
@@ -81,22 +98,80 @@ class PipelineTests(unittest.TestCase):
     def test_all_axes_counted_for_window_budget(self):
         rec = self.record(body='x'*3000)
         write_jsonl(self.data / 'resources/sample/records.jsonl', [rec])
-        cfg = config()
-        cfg['prompts']['axes'] = {axis: axis for axis in schemas()}
+        coordination = load_prompts()['axes']['coordination'].strip()
         def count(chat):
-            return len(chat[-1]['content']) + (3500 if chat[-1]['content'].endswith('coordination') else 0)
+            return len(chat[-1]['content']) + (3500 if chat[-1]['content'].endswith(coordination) else 0)
         run = self.root / 'run'
-        prepare(self.data, run, count, 7000, cfg, with_controls=False)
+        prepare(self.data, run, count, 7000, config(), with_controls=False)
+        rows = list(iter_jsonl(run/'requests.jsonl'))
+        self.assertTrue(any(r['custom_id'].endswith(':coordination') for r in rows))
+        for row in rows:
+            self.assertLessEqual(count(row['body']['messages']), 7000)
+
+    def test_requests_are_self_contained_runner_rows(self):
+        self.prepare([self.record()])
+        cfg = json.loads((self.run/'config.json').read_text())
+        w = next(iter_jsonl(self.run/'windows.jsonl'))
+        rows = list(iter_jsonl(self.run/'requests.jsonl'))
+        self.assertEqual([r['custom_id'] for r in rows], [f"{w['window_id']}:{a}" for a in schemas()])
         from screening_judge.prompts import messages
-        cfg = json.loads((run/'config.json').read_text())
-        for line in (run/'manifest.jsonl').read_text().splitlines():
-            row = json.loads(line)
-            for axis in row['axes']:
-                self.assertLessEqual(count(messages(cfg, row['shape'], axis, row['text'])), 7000)
+        for row, axis in zip(rows, schemas()):
+            self.assertEqual(set(row), {'custom_id', 'body'})
+            body = row['body']
+            self.assertEqual(body['messages'], messages(cfg, w['shape'], axis, w['text']))
+            self.assertEqual(body['response_format'], {'type': 'json_schema',
+                             'json_schema': {'name': axis, 'schema': schemas()[axis]}})
+            self.assertEqual((body['logprobs'], body['top_logprobs']), (True, 10))
+        # The runner receives the profile only: no prompts, schemas or judge keys.
+        self.assertEqual(json.loads((self.run/'engine.json').read_text()), ENGINE)
+
+    def test_label_logprobs_option_and_old_profile_key(self):
+        write_jsonl(self.data/'resources/sample/records.jsonl', [self.record()])
+        count = lambda chat: sum(len(m['content']) for m in chat)
+        prepare(self.data, self.root/'off', count, 15000, config(), with_controls=False, label_logprobs=0)
+        self.assertFalse(any('logprobs' in r['body'] for r in iter_jsonl(self.root/'off/requests.jsonl')))
+        with self.assertRaisesRegex(ValueError, 'label-logprobs'):
+            prepare(self.data, self.root/'old', count, 15000, {**config(), 'label_logprobs': 10}, with_controls=False)
+
+    def test_citation_constraints_narrow_each_request_schema(self):
+        from jsonschema import Draft202012Validator
+        write_jsonl(self.data/'resources/sample/records.jsonl', [self.record(body='x'*600)])
+        self.run = self.root/'run'
+        prepare(self.data, self.run, lambda chat: sum(len(m['content']) for m in chat), 15000,
+                {**config(), 'citation_constraints': True}, with_controls=False)
+        self.assertNotIn('citation_constraints', json.loads((self.run/'engine.json').read_text()))
+        w = next(iter_jsonl(self.run/'windows.jsonl'))
+        sid = next(k for k, v in w['segment_kinds'].items() if v == 'BODY')
+        n = len(w['evidence_chunks'][sid])
+        row = next(r for r in iter_jsonl(self.run/'requests.jsonl') if r['custom_id'].endswith(':hacking'))
+        narrowed = Draft202012Validator(row['body']['response_format']['json_schema']['schema'])
+        base = Draft202012Validator(schemas()['hacking'])
+        res = result('hacking', 'yes')
+        action = {'target': 't', 'action': 'a', 'observed_stage': 'recorded_request',
+                  'responding_system': 'unknown', 'outcome': 'unknown', 'evidence_segment_ids': [sid]}
+        for evidence, actions, ok in (([{'segment_id': sid, 'chunk_id': n, 'location': 'l'}], [action], True),
+                                      ([{'segment_id': sid, 'chunk_id': n + 1, 'location': 'l'}], [], False),
+                                      ([{'segment_id': 'S99', 'chunk_id': 1, 'location': 'l'}], [], False),
+                                      ([], [{**action, 'evidence_segment_ids': []}], False),
+                                      ([], [{**action, 'evidence_segment_ids': ['S99']}], False)):
+            res.update(evidence=evidence, actions=actions)
+            with self.subTest(evidence=evidence, actions=actions):
+                self.assertEqual(narrowed.is_valid(res), ok)
+                if ok:
+                    self.assertTrue(base.is_valid(res))  # narrowing never widens the saved schema
+
+    def test_report_rejects_output_for_a_different_request(self):
+        self.prepare([self.record()])
+        w = next(iter_jsonl(self.run/'windows.jsonl'))
+        uid = w['window_id'] + ':hacking'
+        write_worker(self.run, [{**answered(self.run, uid), 'request_sha256': 'f'*64,
+                                 'status': 'success', 'result': result('hacking')}])
+        parts = reconcile(self.run, [self.run/'outputs'])
+        self.assertIn('prepared request', parts[3][0]['validation_error'])
 
     def test_worker_config_mismatch_rejected(self):
         self.prepare([self.record()])
-        cfg = json.loads((self.run / 'config.json').read_text())
+        cfg = json.loads((self.run / 'engine.json').read_text())
         cfg['sampling']['temperature'] = 0.5
         write_worker(self.run, [], cfg)
         with self.assertRaisesRegex(ValueError, 'config|identity'):
@@ -203,10 +278,19 @@ class ReportSuccessTests(unittest.TestCase):
             if axis!='coordination':
                 res['evidence']=[{'segment_id':sid,'chunk_id':1 if axis=='hacking' else 9999,'location':'test'}]
             res['injection_detected']=axis=='coordination'
-            rows.append({'unit_id':w['window_id']+':'+axis,'window_id':w['window_id'],'axis':axis,
-                         'chunk_idx':w['chunk_idx'],'text_sha256':w['text_sha256'],'status':'success','result':res})
+            rows.append({**answered(self.run, w['window_id']+':'+axis),'axis':axis,
+                         'status':'success','result':res})
+        # Raw final-answer logprobs from the runner; the report derives the label score.
+        text = json.dumps(rows[0]['result'])
+        cut = text.index('"label": "') + len('"label": "')
+        branch = [{'token': t, 'logprob': math.log(p)} for t, p in (('yes', .6), ('no', .3), ('ins', .1))]
+        rows[0]['logprobs'] = {'content': [{'token': text[:cut], 'logprob': 0.0, 'top_logprobs': []},
+                                           {'token': 'yes', 'logprob': math.log(.6), 'top_logprobs': branch},
+                                           {'token': text[cut + 3:], 'logprob': 0.0, 'top_logprobs': []}]}
         write_worker(self.run,rows)
         parts=reconcile(self.run,[self.run/'outputs'])
+        hacking = next(j for j in parts[2] if j['axis'] == 'hacking')
+        self.assertAlmostEqual(hacking['p_yes'], .6)
         summary=write_report(self.run/'report',*parts,None)
         self.assertEqual(summary['unverified_candidates'],1)
         self.assertEqual(summary['assessments']['hacking'],{'positive_uncalibrated':1})
@@ -238,14 +322,12 @@ class WorkerMembershipTests(unittest.TestCase):
         self.run = self.root/'run'
         prepare(self.data, self.run, lambda chat: sum(len(m['content']) for m in chat),
                 15000, config(), with_controls=False, shards=2)
-        return list(iter_jsonl(self.run/'manifest.jsonl'))
+        return list(iter_jsonl(self.run/'requests.jsonl'))
 
-    def worker(self, unit, manifest, limit=None):
+    def worker(self, request, manifest, limit=None):
         from screening_judge.common import sha256_file
-        axis = 'hacking'
-        row = {'unit_id': unit['unit_id']+':'+axis, 'window_id': unit['unit_id'],
-               'axis': axis, 'chunk_idx': unit['chunk_idx'], 'text_sha256': unit['text_sha256'],
-               'status': 'success', 'result': result(axis)}
+        axis = request['custom_id'].rsplit(':', 1)[1]
+        row = {**answered(self.run, request['custom_id']), 'status': 'success', 'result': result(axis)}
         worker = write_worker(self.run, [])
         identity = json.loads((worker/'identity.json').read_text())
         identity.pop('identity')
@@ -254,31 +336,41 @@ class WorkerMembershipTests(unittest.TestCase):
         (worker/'identity.json').write_text(json.dumps({'identity': digest, **identity}))
         write_jsonl(worker/'part-000000.jsonl', [{**row, 'run_identity': digest}])
 
+    def test_shards_keep_each_windows_axes_together(self):
+        requests = self.prepared_run()
+        window = lambda row: row['custom_id'].rsplit(':', 1)[0]
+        seen = []
+        for i in range(2):
+            ids = [window(r) for r in iter_jsonl(self.run/f'shards/part-{i}.jsonl')]
+            self.assertEqual(ids, [w for w in dict.fromkeys(ids) for _ in schemas()])
+            seen += ids
+        self.assertEqual(sorted(seen), sorted(window(r) for r in requests))
+
     def test_output_must_belong_to_workers_own_shard(self):
         units = self.prepared_run()
-        manifest = 'shards/manifest-0000.jsonl'
-        assigned = {r['unit_id'] for r in iter_jsonl(self.run/manifest)}
-        foreign = next(unit for unit in units if unit['unit_id'] not in assigned)
+        manifest = 'shards/part-0.jsonl'
+        assigned = {r['custom_id'] for r in iter_jsonl(self.run/manifest)}
+        foreign = next(unit for unit in units if unit['custom_id'] not in assigned)
         self.worker(foreign, manifest)
         with self.assertRaisesRegex(ValueError, 'outside.*manifest'):
             reconcile(self.run, [self.run/'outputs'])
 
     def test_output_must_respect_workers_selected_prefix(self):
         units = self.prepared_run()
-        self.worker(units[1], 'manifest.jsonl', limit=1)
+        self.worker(units[1], 'requests.jsonl', limit=1)
         with self.assertRaisesRegex(ValueError, 'outside.*manifest'):
             reconcile(self.run, [self.run/'outputs'])
 
     def test_assigned_shard_output_is_accepted(self):
         units = self.prepared_run()
-        manifest = 'shards/manifest-0000.jsonl'
+        manifest = 'shards/part-0.jsonl'
         assigned = next(iter_jsonl(self.run/manifest))
         self.worker(assigned, manifest, limit=1)
         parts = reconcile(self.run, [self.run/'outputs'])
         self.assertEqual(len(parts[2]), 1)
         self.assertEqual(len(parts[3]), 0)
-        expected = {f"{u['unit_id']}:{axis}" for u in units for axis in u['axes']}
-        accepted = assigned['unit_id'] + ':hacking'
+        expected = {u['custom_id'] for u in units}
+        accepted = assigned['custom_id']
         self.assertEqual({row['unit_id'] for row in parts[2]}, {accepted})
         self.assertEqual({row['unit_id'] for row in parts[4]}, expected - {accepted})
 

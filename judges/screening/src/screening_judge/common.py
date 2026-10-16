@@ -22,6 +22,11 @@ def sha256_file(path) -> str:
     return h.hexdigest()
 
 
+def request_sha256(body: dict) -> str:
+    """Canonical request hash; must match the shared runner's request_sha256."""
+    return sha256_text(json.dumps(body, sort_keys=True, ensure_ascii=False, separators=(",", ":")))
+
+
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
