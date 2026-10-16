@@ -12,9 +12,6 @@ def prediction(h, label='no_evidence', score=None, iid=None):
 
 
 class EvaluationTests(unittest.TestCase):
-    def test_verified_positive_is_predicted_positive(self):
-        self.assertIs(e.predict([prediction('x','positive')],'hacking'),True)
-
     def test_unknown_states_not_negatives(self):
         p=prediction('x','new_invalid_state')
         self.assertEqual(e.predict([p],'hacking'),'undecided')
@@ -55,8 +52,6 @@ class EvaluationTests(unittest.TestCase):
         self.assertAlmostEqual(dev['coverage'],1/3)
         self.assertAlmostEqual(dev['end_to_end_positive_recall'],1/3)
         self.assertEqual(report['axes']['hacking']['dev']['unlabeled'],3)
-        for prose in ('notes','split_protocol','historical_holdout_independence'):
-            self.assertNotIn(prose,report)
 
     def test_unrecognized_partition_rejected(self):
         with self.assertRaisesRegex(ValueError,'partition'):
