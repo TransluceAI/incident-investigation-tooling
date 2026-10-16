@@ -16,8 +16,9 @@ def window(**segments):
     from screening_judge.render import render_citable
     segs = [{'segment_id': f'S{i}', 'kind': kind, 'source': 'test', 'text': text}
             for i, (kind, text) in enumerate(segments.items())]
-    text, spans, _ = render_citable(segs)
-    return {'text': text, 'segment_spans': spans, 'segment_kinds': {s['segment_id']: s['kind'] for s in segs},
+    text, spans, chunks = render_citable(segs)
+    return {'text': text, 'segment_spans': spans, 'evidence_chunks': chunks,
+            'segment_kinds': {s['segment_id']: s['kind'] for s in segs},
             'segment_sources': {s['segment_id']: s['source'] for s in segs}}
 
 
@@ -68,6 +69,16 @@ class RuleTests(unittest.TestCase):
     def test_dav_versions_is_precise_enough_to_read_everywhere(self):
         self.assertIn('file_version_path', rules.hits(window(BODY='PROPFIND /remote.php/dav/versions/u/versions/1')))
         self.assertEqual(rules.hits(window(BODY='release notes for version 2')), [])
+
+    def test_rules_match_across_chunk_boundaries(self):
+        from screening_judge.render import CHUNK
+        # Rendering splits segments into [CHUNK] slices; a pattern across a boundary still fires.
+        for start in (100, CHUNK - 5):
+            with self.subTest(start=start):
+                body = 'x' * start + ' PROPFIND /remote.php/dav/versions/u/1'
+                self.assertIn('file_version_path', rules.hits(window(BODY=body)))
+        url = 'http://' + 'a' * (CHUNK - 12) + '.example:8089/repositories/2'
+        self.assertIn('backend_port', rules.hits(window(URL_DECODED=url, BODY='text')))
 
 
 class CascadeTests(unittest.TestCase):
@@ -184,12 +195,14 @@ class CascadeTests(unittest.TestCase):
             (self.run/'report/judgments.jsonl').write_text('')
             cascade.combine(self.run/'report', out, out/'report', self.root/'final2')
 
-    def pass2_answers(self, out, labels=None, bad_citation=()):
-        """Commit pass-2 answers for every selected request (default no)."""
+    def pass2_answers(self, out, labels=None, bad_citation=(), skip=()):
+        """Commit pass-2 answers for every selected request not in skip (default no)."""
         windows = {w['window_id']: w for w in iter_jsonl(out/'windows.jsonl')}
         rows = []
         for r in iter_jsonl(out/'requests.jsonl'):
             uid = r['custom_id']
+            if uid in skip:
+                continue
             res = result(uid.rsplit(':', 1)[1], (labels or {}).get(uid, 'no'))
             if res['label'] == 'yes':
                 w = windows[uid.rsplit(':', 1)[0]]
@@ -242,6 +255,22 @@ class CascadeTests(unittest.TestCase):
         self.assertEqual((summary['pass2_failed'], summary['pass2_unresolved_queued']), (1, 1))
         # Six audited requests; the failed one is not counted among validated audit answers.
         self.assertEqual(summary['audit'], {'audited': 5, 'pass2_positive': 0, 'note': summary['audit']['note']})
+
+    def test_combine_refuses_unfinished_pass2_unless_allowed(self):
+        self.pass1(self.outcomes())
+        out = self.root/'pass2'
+        cascade.escalate(self.run, self.run/'report', out, THINKING, audit_rate=0)
+        uid = self.uid[('b', 'hacking')]  # selected by a rule; pass 1 answered no
+        self.pass2_answers(out, skip={uid})
+        with self.assertRaisesRegex(ValueError, 'pending'):
+            cascade.combine(self.run/'report', out, out/'report', self.root/'refused')
+        summary = cascade.combine(self.run/'report', out, out/'report', self.root/'final', allow_pending=True)
+        final = {j['unit_id']: j for j in iter_jsonl(self.root/'final/final-judgments.jsonl')}
+        self.assertEqual((final[uid]['pass'], final[uid]['pass2_pending']), (1, True))
+        pending = list(iter_jsonl(self.root/'final/pass2-pending.jsonl'))
+        self.assertEqual([(p['unit_id'], p['selection_reasons']) for p in pending],
+                         [(uid, ['rule:file_version_path'])])
+        self.assertEqual(summary['pass2_pending'], 1)
 
     def test_controls_stay_out_of_cascade_queues_and_counts(self):
         from screening_judge.common import write_jsonl
