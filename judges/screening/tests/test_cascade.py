@@ -56,7 +56,7 @@ class RuleTests(unittest.TestCase):
                               metadata={'original_url': 'http://lib.example.edu:8089/repositories/2',
                                         'capture_timestamp': '20260601000000'})
         write_jsonl(self.data/'resources/sample/records.jsonl', [body_link, capture])
-        prepare(self.data, self.root/'run', lambda chat: sum(len(m['content']) for m in chat), 15000, config(),
+        prepare(self.data, self.root/'run', lambda chat: sum(len(m['content']) for m in chat), 18000, config(),
                 with_controls=False)
         fired = {next(i['observations'][0]['observation_id'] for i in iter_jsonl(self.root/'run/items.jsonl')
                       if i['item_id'] == w['item_id']): rules.hits(w)
@@ -92,7 +92,7 @@ class CascadeTests(unittest.TestCase):
         bodies = {'a': 'ordinary text', 'b': 'PROPFIND /remote.php/dav/versions/alice/', 'c': 'weather report'}
         write_jsonl(self.data/'resources/sample/records.jsonl', [self.record(k, v) for k, v in bodies.items()])
         self.run = self.root/'pass1'
-        prepare(self.data, self.run, lambda chat: sum(len(m['content']) for m in chat), 15000, config(),
+        prepare(self.data, self.run, lambda chat: sum(len(m['content']) for m in chat), 18000, config(),
                 with_controls=False)
         windows = {w['item_id']: w for w in iter_jsonl(self.run/'windows.jsonl')}
         items = {i['observations'][0]['observation_id']: i['item_id'] for i in iter_jsonl(self.run/'items.jsonl')}
@@ -301,7 +301,7 @@ class CascadeTests(unittest.TestCase):
         from screening_judge.prepare import prepare
         write_jsonl(self.data/'resources/sample/records.jsonl', [self.record('a', 'ordinary text')])
         self.run = self.root/'pass1'
-        prepare(self.data, self.run, lambda chat: sum(len(m['content']) for m in chat), 15000, config())
+        prepare(self.data, self.run, lambda chat: sum(len(m['content']) for m in chat), 18000, config())
         rows = [{**answered(self.run, r['custom_id']), 'status': 'success',
                  'result': result(r['custom_id'].rsplit(':', 1)[1], 'insufficient_evidence')}
                 for r in iter_jsonl(self.run/'requests.jsonl')]
@@ -327,7 +327,7 @@ class CascadeTests(unittest.TestCase):
         from screening_judge.prepare import prepare
         write_jsonl(self.data/'resources/sample/records.jsonl', [self.record()])
         self.run = self.root/'pass1'
-        prepare(self.data, self.run, lambda chat: sum(len(m['content']) for m in chat), 15000, config())
+        prepare(self.data, self.run, lambda chat: sum(len(m['content']) for m in chat), 18000, config())
         requests = list(iter_jsonl(self.run/'requests.jsonl'))
         control_ids = [r['custom_id'] for r in requests if r['custom_id'].startswith('control-')]
         rows = [{**answered(self.run, r['custom_id']), 'status': 'success',
@@ -363,7 +363,7 @@ class CascadeTests(unittest.TestCase):
         from screening_judge.prepare import prepare
         write_jsonl(self.data/'resources/sample/records.jsonl', [self.record('a', 'ordinary text')])
         self.run = self.root/'pass1'
-        prepare(self.data, self.run, lambda chat: sum(len(m['content']) for m in chat), 15000, config(),
+        prepare(self.data, self.run, lambda chat: sum(len(m['content']) for m in chat), 18000, config(),
                 with_controls=False)
         write_worker(self.run, [{**answered(self.run, r['custom_id']), 'status': 'success',
                                  'result': result(r['custom_id'].rsplit(':', 1)[1])}

@@ -27,7 +27,7 @@ from .prompts import load_prompts, messages, schemas
 from .render import render_citable, windows
 from .schemas import AXES, citation_schema
 
-VERSION = "screening-judge-v1"
+VERSION = "screening-judge-v2"
 # Profile keys the judge consumes; the runner receives only engine/sampling settings.
 NOT_FOR_RUNNER = {"system_prompt", "schema", "citation_constraints", "token_count_mode"}
 
@@ -209,7 +209,7 @@ def prepare(data_root, out, count, window_tokens, config_template, with_controls
     out.mkdir(parents=True, exist_ok=False)
     corpus, gaps = Corpus(data_root), []
     config = {**config_template, "version": VERSION, "prompts": load_prompts(),
-              "schemas": schemas(), "boundary_salt": secrets.token_hex(16),
+              "schemas": schemas(), "confidence_semantics": "chosen_label", "boundary_salt": secrets.token_hex(16),
               "window_tokens": window_tokens, "label_logprobs": label_logprobs,
               "citation_constraints": citation_constraints,
               "preparation_implementation": {

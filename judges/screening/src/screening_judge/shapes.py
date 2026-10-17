@@ -4,6 +4,7 @@ Five shapes cover every kind in the profiled data. An unknown kind falls back to
 the text shape and is counted, never dropped.
 """
 import json
+import re
 
 from . import scanner
 from .decode import URL_RE, decode_url
@@ -56,6 +57,32 @@ def _url_views(segs, item_id, url, label):
         _add(segs, item_id, "DECODE_GAP", f"{label}.{g['source']}", f"not decoded: {g['gap']}")
 
 
+# This repository collects website revisions; its directory names are not
+# independent authorship evidence. Preserve the full observation in items.jsonl.
+COLLECTION_URL = re.compile(
+    r'https://(?:raw\.githubusercontent\.com|github\.com)/'
+    r'JoshuaDavid/WikiAgentSwarmInvestigation/[^\s|]+', re.I)
+
+
+def neutral_collection_context(segments):
+    """Remove collection URLs from metadata, including request_url fallbacks.
+
+    Document text and its decoded views are evidence, so never redact them.
+    Full original metadata and request URLs remain in items.jsonl. Any other
+    mention of the collection name in metadata stops preparation.
+    """
+    for segment in segments:
+        if segment["kind"] in BULK_KINDS or segment["source"].startswith("document:"):
+            continue
+        original = segment["text"]
+        segment["text"] = COLLECTION_URL.sub("[collection archive URL; retained in audit record]", original)
+        if segment["text"] != original:
+            segment["source"] += ":neutral_collection_view"
+        if "wikiagentswarminvestigation" in segment["text"].casefold():
+            raise ValueError("Collection repository name leaked into prompt metadata: " + segment["segment_id"])
+    return segments
+
+
 def build_segments(item: dict, bodies: list) -> list:
     """bodies: [(document_path, text)] in observation order; empty when no text is stored.
 
@@ -83,7 +110,7 @@ def build_segments(item: dict, bodies: list) -> list:
              "\n".join(f"{r['from_replay_url']} -> {r['to_replay_url']}" for r in item["redirects"]))
     if not bodies:
         _add(segs, iid, "BODY", "none", "BODY: missing (no stored text for this item)")
-        return segs
+        return neutral_collection_context(segs)
     for path, text in bodies:
         doc = None
         if shape == "scanner":
@@ -104,7 +131,7 @@ def build_segments(item: dict, bodies: list) -> list:
             if len(urls) > MAX_BODY_URL_VIEWS:
                 _add(segs, iid, "DECODE_GAP", "body_url",
                      f"not decoded: {len(urls) - MAX_BODY_URL_VIEWS} further URLs remain readable in BODY")
-    return segs
+    return neutral_collection_context(segs)
 
 
 # Bulk segments are windowed; every other segment, including PROVENANCE, is context

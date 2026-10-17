@@ -1,0 +1,43 @@
+"""Review hints, never verdicts. Name recognition and setup detection are heuristics."""
+import re
+
+# Unrecognized names are queued for review, not declared false attribution.
+MODEL_OR_PROVIDER = re.compile(
+    r'\b(openai|gpt[\w.-]*|chatgpt|o[134](?:[- ]|\b)|anthropic|claude|'
+    r'google|gemini|deepmind|meta|llama|mistral|qwen|alibaba|deepseek|xai|grok|'
+    r'cohere|muse spark|command[- ]r|moonshot|kimi|gemma|phi[- ]?\d)\b', re.I)
+SETUP = re.compile(r'\b(config(?:uration)?|initializ\w*|log(?:ging)? (?:level|file)|'
+                   r'connect[_ -]?timeout|read[_ -]?timeout|user[_ -]?agent)\b', re.I)
+REQUEST = re.compile(r'(?:\b(?:GET|POST|PUT|DELETE|PATCH|HEAD|OPTIONS)\s+\S+\s+HTTP/\d|'
+                     r'\b(?:sending|sent|received|response status|status_code)\b)', re.I)
+
+
+def review_warnings(result, evidence, confidence_semantics="behaviour_support"):
+    if not isinstance(result, dict):
+        return []
+    flags = []
+    confidence = result.get("confidence")
+    if (confidence_semantics == "behaviour_support" and result.get("label") == "no"
+            and type(confidence) in (int, float) and confidence > .5):
+        flags.append("legacy_confidence_polarity")
+    if result.get("provider_attribution", "not_established") != "not_established":
+        if not MODEL_OR_PROVIDER.search(str(result.get("claimed_actor") or "")):
+            flags.append("provider_attribution_needs_named_model_review")
+    if "attempt_present" in result and ((result.get("label") == "no" and result["attempt_present"])
+                                        or (result.get("label") == "yes" and not result["attempt_present"])):
+        flags.append("attempt_label_contradiction")
+    actions = result.get("actions")
+    for action in actions if isinstance(actions, list) else []:
+        if not isinstance(action, dict):
+            continue
+        if action.get("observed_stage") != "recorded_request":
+            continue
+        if "evidence" in action:
+            keys = {(e["segment_id"], e["chunk_id"]) for e in (action["evidence"] or []) if isinstance(e, dict) and "segment_id" in e and "chunk_id" in e}
+            cited = [e for e in evidence if (e["segment_id"], e["chunk_id"]) in keys]
+        else:
+            cited = [e for e in evidence if e["segment_id"] in action.get("evidence_segment_ids", [])]
+        text = "\n".join(e["quote"] for e in cited)
+        if SETUP.search(text) and not REQUEST.search(text):
+            flags.append("recorded_request_cites_setup_review")
+    return sorted(set(flags))

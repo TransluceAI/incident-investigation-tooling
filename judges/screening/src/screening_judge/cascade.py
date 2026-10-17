@@ -40,11 +40,8 @@ def _audited(seed, uid, rate):
 
 
 def _pass1_rank(demoted):
-    """Order demotions by the pass-1 scores that queued them: confidence, then P(yes)."""
-    first = demoted["pass1"]
-    result = first["result"] if isinstance(first.get("result"), dict) else {}
-    confidence, p_yes = result.get("confidence"), first.get("p_yes")
-    return (confidence is None, -(confidence or 0), p_yes is None, -(p_yes or 0), demoted["unit_id"])
+    """Stable ordering independent of ambiguous model confidence or scores."""
+    return demoted["unit_id"]
 
 
 def escalate(run, report, out, engine_template, borderline=(0.2, 0.8), audit_rate=0.03, seed=0,

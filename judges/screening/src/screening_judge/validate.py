@@ -3,7 +3,8 @@
 Rules carried over from judges/arquivo: hash identity, schema validity, exact
 chunk resolution, and supported_success only for a response from a
 non-archive system. New rules enforce what the grammar does not: a yes needs at
-least one resolved citation, and every action needs at least one known segment.
+least one resolved citation. V2 actions carry their own citations; saved v1
+schemas and their segment cross-references remain supported.
 """
 from .common import sha256_text
 from .render import validate_chunk_map
@@ -30,7 +31,10 @@ def validate(row: dict, unit: dict, schema: dict) -> list:
     except (ValueError, KeyError, TypeError) as exc:
         raise ValidationError(f"Chunk map: {exc}") from exc
     resolved, seen = [], set()
-    for entry in result["evidence"]:
+    entries = list(result["evidence"])
+    for action in result.get("actions", []):
+        entries.extend(action.get("evidence", []))
+    for entry in entries:
         # JSON Schema treats integer-valued numbers such as 1.0 as integers.
         # Schema validation above excludes booleans and fractional values.
         sid, idx = entry["segment_id"], int(entry["chunk_id"])
@@ -49,8 +53,8 @@ def validate(row: dict, unit: dict, schema: dict) -> list:
     if result["label"] == "yes" and not resolved:
         raise ValidationError("Positive label without resolved evidence")
     for action in result.get("actions", []):
-        ids = action["evidence_segment_ids"]
-        if not ids or not set(ids) <= {e["segment_id"] for e in resolved}:
+        ids = action.get("evidence_segment_ids")  # legacy prepared schemas remain readable
+        if ids is not None and (not ids or not set(ids) <= {e["segment_id"] for e in resolved}):
             raise ValidationError("Action requires segments with resolved evidence citations")
         if action["outcome"] == "supported_success" and (
                 action["observed_stage"] not in {"observed_response", "demonstrated_outcome"}
