@@ -66,8 +66,9 @@ class SharedRunnerContractTests(unittest.TestCase):
                 outputs = []
                 for chat, params in zip(chats, kwargs['sampling_params']):
                     schema = params['structured_outputs']['json']
-                    axis = 'hacking' if 'categories' in schema['properties'] else (
-                        'agentic_activity' if 'claimed_actor' in schema['properties'] else 'coordination')
+                    props = schema.get('properties') or schema['anyOf'][0]['properties']
+                    axis = 'hacking' if 'categories' in props else (
+                        'agentic_activity' if 'claimed_actor' in props else 'coordination')
                     seen.append((axis, params.get('logprobs')))
                     text = json.dumps(result(axis), separators=(',', ':'))
                     at = text.index('"label":"') + len('"label":"')
@@ -93,7 +94,7 @@ class SharedRunnerContractTests(unittest.TestCase):
                         [{'observation_id': 'one', 'kind': 'raw_paste', 'document_path': 'one.txt',
                           'text_sha256': sha256_text('ordinary public text')}])
             run = root / 'run'
-            prepare(root / 'data', run, lambda chat: sum(len(m['content']) for m in chat), 15000,
+            prepare(root / 'data', run, lambda chat: sum(len(m['content']) for m in chat), 18000,
                     config(), with_controls=False)
             argv = ['runner', '--config', str(run / 'engine.json'), '--input-manifest', str(run / 'requests.jsonl'),
                     '--output-dir', str(run / 'outputs'), '--worker-id', '0']

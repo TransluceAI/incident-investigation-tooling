@@ -4,6 +4,7 @@ Five shapes cover every kind in the profiled data. An unknown kind falls back to
 the text shape and is counted, never dropped.
 """
 import json
+import re
 
 from . import scanner
 from .decode import URL_RE, decode_url
@@ -56,6 +57,15 @@ def _url_views(segs, item_id, url, label):
         _add(segs, item_id, "DECODE_GAP", f"{label}.{g['source']}", f"not decoded: {g['gap']}")
 
 
+def _prompt_provenance(obs):
+    """Hide only the source_url field holding an import location; items.jsonl keeps it."""
+    location = obs.get("import_location")
+    if not location:
+        return obs["line"]
+    field = re.compile(r"(?<![\w.])((?:\w+\.)*source_url)=" + re.escape(location) + r"(?= \| |$)")
+    return field.sub(r"\1=[import location; kept in audit record]", obs["line"])
+
+
 def build_segments(item: dict, bodies: list) -> list:
     """bodies: [(document_path, text)] in observation order; empty when no text is stored.
 
@@ -74,7 +84,7 @@ def build_segments(item: dict, bodies: list) -> list:
         f"time_basis: {', '.join(sorted(item['time_basis'])) or 'unknown'}",
         f"stored_text: {'available' if bodies else 'missing'}",
     ]))
-    _add(segs, iid, "PROVENANCE", "records", "\n".join(o["line"] for o in item["observations"]))
+    _add(segs, iid, "PROVENANCE", "records", "\n".join(map(_prompt_provenance, item["observations"])))
     for url in item["request_urls"]:
         _add(segs, iid, "URL", "request_url", url)
         _url_views(segs, iid, url, "request_url")

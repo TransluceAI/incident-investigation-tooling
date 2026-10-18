@@ -12,10 +12,8 @@ recall audits; they are never counted as positive.
 
 The review queue holds every request needing a human: verified positives on any
 axis, unverified positives, abstentions, and failures, in that order. Within
-each reason it is sorted by the model's 0-1 confidence for that axis (missing
-scores last), then by P(yes) from the label logprobs. Neither score is
-calibrated; both only order the queue. Confidence represents support for the
-behaviour. A run expects exactly the requests in its requests.jsonl, so a second-pass
+each reason it uses stable request IDs, independent of confidence and P(yes).
+Raw scores remain available for audits. Warnings never alter labels. A second-pass
 run over a subset of requests reports only those.
 
 Outputs come from the shared runner (inference/qwen). Each committed row must
@@ -32,6 +30,7 @@ from .common import atomic_write_text, iter_jsonl, write_jsonl, request_sha256, 
 from .schemas import AXES, FINDINGS_CYBERATTACK
 from .scores import label_probabilities
 from .validate import ValidationError, validate
+from .warnings import review_warnings
 
 
 # Fields reconciliation reads. Reasoning and token logprobs are dropped once
@@ -125,7 +124,12 @@ def reconcile(run, output_dirs, near_miss_threshold=0.2):
                     "result": row.get("result"), "label_probs": probs, "p_yes": (probs or {}).get("yes"),
                     "run_identity": row.get("run_identity"), "config_sha256": preparation["config_sha256"],
                     "preparation_sha256": preparation_sha256,
-                    "source": items[w["item_id"]]["source"]}
+                    "source": items[w["item_id"]]["source"],
+                    "confidence_semantics": config.get("confidence_semantics", "behaviour_support")}
+            # Before schema validation, only inspect the two scalar confidence fields.
+            raw = base["result"] if isinstance(base["result"], dict) else {}
+            base["review_warnings"] = review_warnings(
+                {k: raw.get(k) for k in ("label", "confidence")}, [], base["confidence_semantics"])
             try:
                 if row.get("custom_id") != uid or row.get("request_sha256") != requested.get(uid):
                     raise ValidationError("Output does not answer the prepared request")
@@ -141,7 +145,8 @@ def reconcile(run, output_dirs, near_miss_threshold=0.2):
                 continue
             p_yes = base["p_yes"]
             ok = {**base, "validation_status": "validated", "evidence": evidence,
-                  "segment_sources": w["segment_sources"]}
+                  "segment_sources": w["segment_sources"],
+                  "review_warnings": review_warnings(row["result"], evidence, base["confidence_semantics"])}
             judgments.append(ok)
             by_item_axis[(w["item_id"], axis)].append(ok)
             if row["result"]["label"] == "no" and p_yes is not None and p_yes >= near_miss_threshold:
@@ -197,7 +202,7 @@ def queue_reason(judgment):
 
 
 def review_queue(judgments, items):
-    """Positives on any axis, unverified positives, abstentions and failures; by confidence then P(yes) within each."""
+    """Order by reason and stable request ID; retain raw scores only for audit."""
     queue = []
     for j in judgments:
         reason = queue_reason(j)
@@ -214,9 +219,25 @@ def review_queue(judgments, items):
             row["findings_cyberattack"] = [FINDINGS_CYBERATTACK[c] for c in dict.fromkeys(categories or ())
                                            if c in FINDINGS_CYBERATTACK]
         queue.append(row)
-    return sorted(queue, key=lambda r: (QUEUE_ORDER.index(r["queue_reason"]),
-                                        r["confidence"] is None, -(r["confidence"] or 0),
-                                        r["p_yes"] is None, -(r["p_yes"] or 0), r["unit_id"]))
+    return sorted(queue, key=lambda r: (QUEUE_ORDER.index(r["queue_reason"]), r["unit_id"]))
+
+
+def content_families(results):
+    """Identical stored bodies, not deduplicated incidents: contexts may differ."""
+    groups = defaultdict(list)
+    for row in results:
+        hashes = tuple(sorted(set(row["text_sha256s"])))
+        if hashes:
+            groups[(row["source"], hashes)].append(row)
+    families = []
+    for (source, hashes), members in sorted(groups.items()):
+        families.append({"family_id": sha256_text(json.dumps([source, hashes]))[:24],
+                         "source": source, "text_sha256s": list(hashes),
+                         "item_ids": sorted(r["item_id"] for r in members),
+                         "item_count": len(members),
+                         "axes": {axis: dict(Counter(r["axes"][axis]["assessment"] for r in members))
+                                  for axis in AXES}})
+    return families
 
 
 def _bucket(n):
@@ -246,6 +267,10 @@ def write_report(dest, config, results, judgments, failures, pending, unverified
                                              and isinstance(j.get("result"), dict)
                                              and j["result"].get("injection_detected") is True])):
         write_jsonl(dest / f"{name}.jsonl", rows)
+    families = content_families(results)
+    write_jsonl(dest / "content-families.jsonl", families)
+    warning_rows = [j for j in judgments if j.get("review_warnings") and j["source"] != control_set.SOURCE]
+    write_jsonl(dest / "review-warnings.jsonl", warning_rows)
     by_axis = {a: dict(Counter(r["axes"][a]["assessment"] for r in results)) for a in AXES}
     positives = {"positive"}
     negative = [j for j in judgments if j["validation_status"] == "validated" and j["result"]["label"] == "no"]
@@ -257,6 +282,12 @@ def write_report(dest, config, results, judgments, failures, pending, unverified
         window_rate[a] = {b: {"items": len(v), "positive_rate": sum(v) / len(v)} for b, v in sorted(groups.items())}
     summary = {
         "version": config.get("version"),
+        "confidence_semantics": config.get("confidence_semantics", "behaviour_support"),
+        "review_warnings": dict(Counter(w for j in warning_rows for w in j["review_warnings"])),
+        "content_families": {"total_with_stored_text": len(families),
+                             "items_without_stored_text": sum(not r["text_sha256s"] for r in results),
+                             "repeated": sum(f["item_count"] > 1 for f in families),
+                             "positive": {a: sum("positive" in f["axes"][a] for f in families) for a in AXES}},
         "controls": {**control_set.score(control_rows), **control_counts},
         "items": len(results), "requests_expected": len(judgments) + all_pending,
         "validated": sum(j["validation_status"] == "validated" for j in judgments),
@@ -268,8 +299,7 @@ def write_report(dest, config, results, judgments, failures, pending, unverified
         "positive_rate_by_window_count": window_rate,
         "injection_detected_items": sum(any(r["axes"][a]["injection_detected"] for a in AXES) for r in results),
         "label_probs_available": sum(j.get("label_probs") is not None for j in judgments),
-        # Confidence should be near 0 on a "no"; a high value means the model read it as
-        # certainty in its label. Tracked until the field's meaning is shown reliable.
+        # Descriptive only: high negative confidence is expected under chosen_label semantics.
         "confidence_on_negatives": {"validated_no": len(negative), "above_half": sum(
             type(j["result"].get("confidence")) in (int, float) and j["result"]["confidence"] > .5 for j in negative)},
         "failure_reasons": dict(Counter(f["validation_error"].split(":")[0] for f in failures)),

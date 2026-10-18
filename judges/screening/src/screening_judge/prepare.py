@@ -27,7 +27,7 @@ from .prompts import load_prompts, messages, schemas
 from .render import render_citable, windows
 from .schemas import AXES, citation_schema
 
-VERSION = "screening-judge-v1"
+VERSION = "screening-judge-v2"
 # Profile keys the judge consumes; the runner receives only engine/sampling settings.
 NOT_FOR_RUNNER = {"system_prompt", "schema", "citation_constraints", "token_count_mode"}
 
@@ -70,10 +70,14 @@ def _observe(item, rec):
     item["kinds"].add(str(rec.get("kind")))
     if rec.get("time_basis"):
         item["time_basis"].add(str(rec["time_basis"]))
-    item["observations"].append({"observation_id": rec["observation_id"], "kind": rec.get("kind"),
-                                 "line": records.provenance_line(rec)})
+    obs = {"observation_id": rec["observation_id"], "kind": rec.get("kind"),
+           "line": records.provenance_line(rec)}
+    location = records.import_location(rec, item["source"])
+    if location:
+        obs["import_location"] = location
+    item["observations"].append(obs)
     if item["shape"] == "capture":
-        url = records.request_url(rec)
+        url = records.request_url(rec, item["source"])
         if url and url not in item["request_urls"]:
             item["request_urls"].append(url)
     if rec.get("document_path"):
@@ -209,7 +213,7 @@ def prepare(data_root, out, count, window_tokens, config_template, with_controls
     out.mkdir(parents=True, exist_ok=False)
     corpus, gaps = Corpus(data_root), []
     config = {**config_template, "version": VERSION, "prompts": load_prompts(),
-              "schemas": schemas(), "boundary_salt": secrets.token_hex(16),
+              "schemas": schemas(), "confidence_semantics": "chosen_label", "boundary_salt": secrets.token_hex(16),
               "window_tokens": window_tokens, "label_logprobs": label_logprobs,
               "citation_constraints": citation_constraints,
               "preparation_implementation": {

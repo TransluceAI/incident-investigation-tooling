@@ -15,6 +15,7 @@ become text-shape Items or explicit gaps.
 import json
 import re
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from .common import sha256_text
 
@@ -67,22 +68,37 @@ def _scalars(obj, prefix="", depth=0):
         yield prefix[:-1], obj
 
 
-def _pick(rec, names, pattern, want_url):
+def _pick(rec, names, pattern, want_url, skip=None):
     meta = metadata(rec)
     for scope in (meta, rec):
         for name in names:
             v = scope.get(name)
-            if isinstance(v, str) and v and (not want_url or v.startswith(("http://", "https://"))):
+            if isinstance(v, str) and v and v != skip and (not want_url or v.startswith(("http://", "https://"))):
                 return v
     for key, v in _scalars({"metadata": meta, **{k: x for k, x in rec.items() if k != "original_record"}}):
-        if isinstance(v, str) and pattern.search(key.rsplit(".", 1)[-1]):
+        if isinstance(v, str) and v != skip and pattern.search(key.rsplit(".", 1)[-1]):
             if not want_url or v.startswith(("http://", "https://")):
                 return v
     return None
 
 
-def request_url(rec):
-    return _pick(rec, URL_KEYS, URLISH, True)
+def request_url(rec, source):
+    """The URL the record observed. An import location never qualifies."""
+    return _pick(rec, URL_KEYS, URLISH, True, skip=import_location(rec, source))
+
+
+def import_location(rec, source):
+    """Where an imported record was copied from, unless that is the source site itself.
+
+    Such a value names an earlier collection (a repository, export file or local
+    path), not the observed activity, so prompts must not read it as evidence.
+    """
+    url = rec.get("source_url")
+    if rec.get("collection_method") != "imported" or not isinstance(url, str) or not url:
+        return None
+    host = (urlsplit(url).hostname or "").removeprefix("www.")
+    site = source.split("/", 1)[0].lower().removeprefix("www.")
+    return None if host and (host == site or host.endswith("." + site)) else url
 
 
 def observed_time(rec):
@@ -102,7 +118,7 @@ def provenance_line(rec) -> str:
 
 def item_key(source, shape, rec):
     if shape == "capture":
-        url, ts = request_url(rec), observed_time(rec)
+        url, ts = request_url(rec, source), observed_time(rec)
         if url:
             return "capture|" + sha256_text(f"{source}|{url}|{ts or rec['observation_id']}")[:24]
     if rec.get("text_sha256"):
