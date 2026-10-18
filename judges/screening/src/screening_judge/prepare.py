@@ -77,8 +77,8 @@ def _observe(item, rec):
         obs["import_location"] = location
     item["observations"].append(obs)
     if item["shape"] == "capture":
-        url = records.request_url(rec)
-        if url and url != location and url not in item["request_urls"]:
+        url = records.request_url(rec, item["source"])
+        if url and url not in item["request_urls"]:
             item["request_urls"].append(url)
     if rec.get("document_path"):
         doc = (rec["document_path"], rec.get("text_sha256"))

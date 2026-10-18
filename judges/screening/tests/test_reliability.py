@@ -10,6 +10,7 @@ from screening_judge.cascade import _pass1_rank
 import test_pipeline as tp
 from test_pipeline import result
 from screening_judge.common import iter_jsonl
+from screening_judge.records import import_location
 
 
 class ReliabilityTests(unittest.TestCase):
@@ -134,6 +135,31 @@ class ReliabilityTests(unittest.TestCase):
         items = list(iter_jsonl(self.run/'items.jsonl'))
         self.assertEqual(sorted(u for i in items for u in i['request_urls']), sorted(urls))
         self.assertFalse(any('import_location' in o for i in items for o in i['observations']))
+
+    def test_request_url_skips_import_location_and_keeps_records_apart(self):
+        export = 'https://raw.githubusercontent.com/someone/collection/main/links.csv'
+        targets = ['https://target.example/?q=%27%20OR%201=1--', 'https://other.example/page']
+        self.prepare([self.record(str(n), kind='prior_mapping', collection_method='imported',
+                                  source_url=export, long_url=url, retrieved_at='2026-01-01')
+                      for n, url in enumerate(targets)])
+        items = list(iter_jsonl(self.run/'items.jsonl'))
+        self.assertEqual(sorted(u for i in items for u in i['request_urls']), sorted(targets))
+
+    def test_redaction_rewrites_only_the_source_url_field(self):
+        self.prepare([self.record(collection_method='imported', source_url='data', note='metadata dump')])
+        provenance = self.texts('PROVENANCE')[0]
+        self.assertIn('note=metadata dump', provenance)
+        self.assertIn('source_url=[import location; kept in audit record]', provenance)
+
+    def test_source_site_match_ignores_case(self):
+        rec = {'collection_method': 'imported', 'source_url': 'https://www.example.com/page'}
+        self.assertIsNone(import_location(rec, 'Example.com'))
+
+    def test_schema_failure_names_the_failing_field(self):
+        w, _, _ = self.setup_action()
+        bad = {**result('coordination'), 'mechanism': 'bogus'}
+        with self.assertRaisesRegex(ValidationError, r"^Schema: mechanism: 'bogus' is not one of"):
+            validate({'status': 'success', 'result': bad}, w, schema('coordination'))
 
     def test_body_groups_keep_context_disagreements_and_do_not_merge_missing_bodies(self):
         axes=lambda label:{a:{'assessment':label} for a in ('hacking','agentic_activity','coordination')}

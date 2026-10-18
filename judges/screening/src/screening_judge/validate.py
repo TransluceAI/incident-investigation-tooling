@@ -6,12 +6,29 @@ non-archive system. New rules enforce what the grammar does not: a yes needs at
 least one resolved citation. V2 actions carry their own citations; saved v1
 schemas and their segment cross-references remain supported.
 """
+from collections import defaultdict
+
 from .common import sha256_text
 from .render import validate_chunk_map
 
 
 class ValidationError(ValueError):
     pass
+
+
+def _closest(errors):
+    """Leaf schema errors; for an anyOf failure, those of the branches that came closest."""
+    leaves = []
+    for error in errors:
+        if not error.context:
+            leaves.append(error)
+            continue
+        branches = defaultdict(list)
+        for e in error.context:
+            branches[e.relative_schema_path[0]].append(e)
+        fewest = min(map(len, branches.values()))
+        leaves += _closest([e for b in branches.values() if len(b) == fewest for e in b])
+    return leaves
 
 
 def validate(row: dict, unit: dict, schema: dict) -> list:
@@ -23,9 +40,10 @@ def validate(row: dict, unit: dict, schema: dict) -> list:
     if sha256_text(unit["text"]) != unit["text_sha256"]:
         raise ValidationError("Input hash mismatch")
     result = row.get("result")
-    errors = sorted(Draft202012Validator(schema).iter_errors(result), key=lambda e: e.path)
+    errors = _closest(Draft202012Validator(schema).iter_errors(result))
     if errors:
-        raise ValidationError("Schema: " + errors[0].message[:300])
+        raise ValidationError("Schema: " + "; ".join(dict.fromkeys(
+            f"{'/'.join(map(str, e.absolute_path)) or 'result'}: {e.message}" for e in errors))[:300])
     try:
         validate_chunk_map(unit)
     except (ValueError, KeyError, TypeError) as exc:
