@@ -27,7 +27,7 @@ from .prompts import load_prompts, messages, schemas
 from .render import render_citable, windows
 from .schemas import AXES, citation_schema
 
-VERSION = "screening-judge-v2"
+VERSION = "screening-judge-v3"
 # Profile keys the judge consumes; the runner receives only engine/sampling settings.
 NOT_FOR_RUNNER = {"system_prompt", "schema", "citation_constraints", "token_count_mode"}
 
@@ -70,11 +70,15 @@ def _observe(item, rec):
     item["kinds"].add(str(rec.get("kind")))
     if rec.get("time_basis"):
         item["time_basis"].add(str(rec["time_basis"]))
-    item["observations"].append({"observation_id": rec["observation_id"], "kind": rec.get("kind"),
-                                 "line": records.provenance_line(rec)})
+    obs = {"observation_id": rec["observation_id"], "kind": rec.get("kind"),
+           "line": records.provenance_line(rec)}
+    location = records.import_location(rec, item["source"])
+    if location:
+        obs["import_location"] = location
+    item["observations"].append(obs)
     if item["shape"] == "capture":
         url = records.request_url(rec)
-        if url and url not in item["request_urls"]:
+        if url and url != location and url not in item["request_urls"]:
             item["request_urls"].append(url)
     if rec.get("document_path"):
         doc = (rec["document_path"], rec.get("text_sha256"))

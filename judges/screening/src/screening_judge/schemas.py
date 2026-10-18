@@ -5,12 +5,16 @@ model writes its cited evidence and reasoning before the label (all surveyed
 frameworks and vendor guidance put reasoning first). Labels are binary plus an
 abstain value.
 
-Hacking uses disjoint anyOf branches: attempt_present=false forces actions=[],
-while true requires at least one action. Action citations are local, and their
-resolved union is built by the reporter. citation_schema additionally narrows
-all pointers to the supplied window. Exercise these schemas on the deployed
-grammar backend whenever their structure changes.
+Every axis splits on evidence: an empty evidence list allows only no or
+insufficient_evidence. Hacking also uses disjoint anyOf branches:
+attempt_present=false forces actions=[], while true requires at least one
+action, each with its own citations; the reporter builds their resolved union.
+citation_schema additionally narrows all pointers to the supplied window.
+Exercise these schemas on the deployed grammar backend whenever their structure
+changes.
 """
+from copy import deepcopy
+
 AXES = ("hacking", "agentic_activity", "coordination")
 LABELS = ("yes", "no", "insufficient_evidence")
 HACKING_CATEGORIES = ("sql_injection", "xss", "command_injection", "template_injection",
@@ -84,22 +88,36 @@ def _base_schema(axis: str) -> dict:
             "additionalProperties": False, "required": list(props), "properties": props}
 
 
+def _evidence_branches(base):
+    """An uncited answer cannot be positive; preserve evidence-first decoding."""
+    empty = deepcopy(base)
+    empty["properties"]["evidence"]["maxItems"] = 0
+    empty["properties"]["label"]["enum"] = ["no", "insufficient_evidence"]
+    if base["properties"]["evidence"].get("maxItems") == 0:
+        return [empty]
+    cited = deepcopy(base)
+    cited["properties"]["evidence"]["minItems"] = 1
+    return [empty, cited]
+
+
 def _gate(base):
     """Disjoint complete branches work with JSON Schema and xgrammar alike."""
-    from copy import deepcopy
     branches = []
     for present in (False, True):
         branch = deepcopy(base)
         props = branch["properties"]
         props["attempt_present"] = {"type": "boolean", "enum": [present]}
         props["actions"]["minItems" if present else "maxItems"] = 1 if present else 0
-        branches.append(branch)
+        # A real attempt already requires action-local citations. Without an
+        # action, positive answers must cite top-level evidence instead.
+        branches.extend([branch] if present else _evidence_branches(branch))
     return {"$schema": base["$schema"], "anyOf": branches}
 
 
 def schema(axis: str) -> dict:
     base = _base_schema(axis)
-    return _gate(base) if axis == "hacking" else base
+    return _gate(base) if axis == "hacking" else {
+        "$schema": base["$schema"], "anyOf": _evidence_branches(base)}
 
 
 def citation_schema(axis: str, chunks: dict) -> dict:
@@ -119,11 +137,11 @@ def citation_schema(axis: str, chunks: dict) -> dict:
             # xgrammar rejects it even though JSON Schema accepts the schema.
             props["attempt_present"] = {"type": "boolean", "enum": [False]}
             props["actions"] = {**props["actions"], "maxItems": 0}
-            return base
+            return _evidence_branches(base)[0]
         props["actions"] = {**props["actions"], "items": {**ACTION, "properties": {
             **ACTION["properties"], "evidence": {**evidence, "minItems": 1}}}}
         return _gate(base)
-    return base
+    return {"$schema": base["$schema"], "anyOf": _evidence_branches(base)}
 
 
 # Field instructions for the prompt. vLLM's structured-output guide recommends

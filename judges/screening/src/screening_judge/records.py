@@ -15,6 +15,7 @@ become text-shape Items or explicit gaps.
 import json
 import re
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from .common import sha256_text
 
@@ -83,6 +84,20 @@ def _pick(rec, names, pattern, want_url):
 
 def request_url(rec):
     return _pick(rec, URL_KEYS, URLISH, True)
+
+
+def import_location(rec, source):
+    """Where an imported record was copied from, unless that is the source site itself.
+
+    Such a value names an earlier collection (a repository, export file or local
+    path), not the observed activity, so prompts must not read it as evidence.
+    """
+    url = rec.get("source_url")
+    if rec.get("collection_method") != "imported" or not isinstance(url, str) or not url:
+        return None
+    host = (urlsplit(url).hostname or "").removeprefix("www.")
+    site = source.split("/", 1)[0].removeprefix("www.")
+    return None if host and (host == site or host.endswith("." + site)) else url
 
 
 def observed_time(rec):

@@ -1,14 +1,12 @@
 """Observed failure regressions and legacy compatibility; no model-accuracy claims."""
 import copy
-import json
 import unittest
 from jsonschema import Draft202012Validator
-from screening_judge.schemas import schema, citation_schema
+from screening_judge.schemas import schema, citation_schema, _base_schema
 from screening_judge.validate import validate, ValidationError
 from screening_judge.warnings import review_warnings
 from screening_judge.report import review_queue, content_families
 from screening_judge.cascade import _pass1_rank
-from screening_judge.shapes import build_segments
 import test_pipeline as tp
 from test_pipeline import result
 from screening_judge.common import iter_jsonl
@@ -55,10 +53,26 @@ class ReliabilityTests(unittest.TestCase):
         self.assertFalse(validator.is_valid({**res,'evidence':[
             {'segment_id':'S0','chunk_id':1,'location':'unavailable'}]}))
 
+    def test_positive_requires_citations_on_every_axis(self):
+        w, citation, _ = self.setup_action()
+        for axis in ('hacking', 'agentic_activity', 'coordination'):
+            for spec in (schema(axis), citation_schema(axis, w['evidence_chunks'])):
+                validator = Draft202012Validator(spec)
+                with self.subTest(axis=axis, spec=spec):
+                    self.assertFalse(validator.is_valid(result(axis, 'yes')))
+                    for label in ('no', 'insufficient_evidence'):
+                        self.assertTrue(validator.is_valid(result(axis, label)))
+                    cited = {**result(axis, 'yes'), 'evidence': [citation]}
+                    self.assertTrue(validator.is_valid(cited))
+                    self.assertEqual(len(validate({'status':'success', 'result':cited}, w, spec)), 1)
+            empty = Draft202012Validator(citation_schema(axis, {}))
+            self.assertFalse(empty.is_valid(result(axis, 'yes')))
+            self.assertTrue(empty.is_valid(result(axis, 'insufficient_evidence')))
+
     def test_legacy_actions_still_validate_against_the_saved_schema(self):
         w,citation,action = self.setup_action()
         # Recreate the old field layout: saved v1 schemas, not current v2, govern old rows.
-        old = copy.deepcopy(schema('hacking')['anyOf'][0]); props=old['properties']
+        old = copy.deepcopy(_base_schema('hacking')); props=old['properties']
         del props['attempt_present'];old['required'].remove('attempt_present')
         action_spec=props['actions']['items'];props['actions'].pop('maxItems')
         del action_spec['properties']['evidence'];action_spec['required'].remove('evidence')
@@ -97,31 +111,29 @@ class ReliabilityTests(unittest.TestCase):
         evidence[0]['quote']+='\nGET /x HTTP/1.1'
         self.assertEqual(review_warnings({'actions':[a]},evidence),[])
 
-    def test_collection_path_neutralized_only_in_provenance_full_audit_preserved(self):
-        path='https://raw.githubusercontent.com/JoshuaDavid/WikiAgentSwarmInvestigation/abc/agent-logs/milkwiki/revisions.jsonl'
-        self.prepare([self.record(body='A source link: '+path,kind='prior_repository_revision',source_url=path)])
-        item=next(iter_jsonl(self.run/'items.jsonl'));w=next(iter_jsonl(self.run/'windows.jsonl'))
-        self.assertIn(path,item['observations'][0]['line'])
-        texts={sid:''.join(w['text'][c['text_start']:c['text_end']] for c in cs) for sid,cs in w['evidence_chunks'].items()}
-        self.assertTrue(all('WikiAgentSwarmInvestigation' not in texts[s] for s,k in w['segment_kinds'].items() if k=='PROVENANCE'))
-        self.assertTrue(any(path in texts[s] for s,k in w['segment_kinds'].items() if k=='BODY'))
+    def texts(self, kind):
+        w = next(iter_jsonl(self.run/'windows.jsonl'))
+        return [''.join(w['text'][c['text_start']:c['text_end']] for c in w['evidence_chunks'][sid])
+                for sid, k in w['segment_kinds'].items() if k == kind]
 
-    def test_collection_source_url_fallback_cannot_leak(self):
-        path='https://raw.githubusercontent.com/JoshuaDavid/WikiAgentSwarmInvestigation/abc/agent-logs/milkwiki/revisions.jsonl'
-        rec=self.record(body='ordinary text',kind='wayback_capture',source_url=path)
-        self.prepare([rec])
-        item=next(iter_jsonl(self.run/'items.jsonl'))
-        self.assertEqual(item['request_urls'],[path])  # full audit trail
-        for request in iter_jsonl(self.run/'requests.jsonl'):
-            self.assertNotIn('WikiAgentSwarmInvestigation',json.dumps(request))
-        w=next(iter_jsonl(self.run/'windows.jsonl'))
-        self.assertTrue(any(source.startswith('request_url:neutral_collection_view')
-                            for source in w['segment_sources'].values()))
+    def test_import_location_hidden_from_prompt_metadata_but_kept_for_audit(self):
+        path = 'https://raw.githubusercontent.com/someone/collection/abc/agent-logs/wiki/revisions.jsonl'
+        self.prepare([self.record(body='A source link: '+path, kind='prior_mapping',
+                                  collection_method='imported', source_url=path)])
+        item = next(iter_jsonl(self.run/'items.jsonl'))
+        self.assertIn(path, item['observations'][0]['line'])
+        self.assertEqual(item['observations'][0]['import_location'], path)
+        self.assertEqual(item['request_urls'], [])
+        self.assertTrue(all('agent-logs' not in t for t in self.texts('PROVENANCE') + self.texts('URL')))
+        self.assertTrue(any(path in t for t in self.texts('BODY')))  # document text is evidence
 
-    def test_unhandled_collection_metadata_leak_stops_preparation(self):
-        with self.assertRaisesRegex(ValueError,'repository name leaked'):
-            self.prepare([self.record(metadata={'collection':'WikiAgentSwarmInvestigation'})])
-        self.assertFalse((self.run/'preparation.json').exists())
+    def test_source_site_and_directly_collected_urls_stay_visible(self):
+        urls = ['https://www.sample/view/abc', 'https://elsewhere.example/agent-logs/x']
+        self.prepare([self.record('own', kind='prior_mapping', collection_method='imported', source_url=urls[0]),
+                      self.record('direct', kind='prior_mapping', collection_method='wayback', source_url=urls[1])])
+        items = list(iter_jsonl(self.run/'items.jsonl'))
+        self.assertEqual(sorted(u for i in items for u in i['request_urls']), sorted(urls))
+        self.assertFalse(any('import_location' in o for i in items for o in i['observations']))
 
     def test_body_groups_keep_context_disagreements_and_do_not_merge_missing_bodies(self):
         axes=lambda label:{a:{'assessment':label} for a in ('hacking','agentic_activity','coordination')}
