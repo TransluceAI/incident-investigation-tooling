@@ -580,10 +580,12 @@ def run(resources):
     validation_path = directory / 'validated.json'
     validation = {'identity': identity, 'runtime': runtime(tokenizer)}
     validated = not args.validate_only and recorded(validation_path) == validation
+    validation_started = time.monotonic()
     if not validated:
         for batch in batches(units(args.fixtures, args.max_records), tokenizer, config, {}):
             for row, _, _ in batch:
                 validator_for(row)
+    validation_seconds = time.monotonic() - validation_started
     if args.validate_only:
         print(json.dumps({'event': 'validated', 'units': len(input_info), 'identity': identity}), flush=True)
         return
@@ -600,6 +602,7 @@ def run(resources):
     if not validated:
         # Only the worker's own writer records a pass, after the lock and identity checks.
         write_json(validation_path, validation)
+    print(json.dumps({'event': 'validation', 'reused': validated, 'seconds': validation_seconds}), flush=True)
     done = committed(directory, identity)
     if not set(done).issubset(input_info):
         raise ValueError('Committed IDs outside selected manifest')
