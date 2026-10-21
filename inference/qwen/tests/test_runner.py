@@ -301,6 +301,77 @@ class ReasoningTests(unittest.TestCase):
             self.assertFalse({'attempt', 'previous_attempts', 'thinking_budget_exhausted'} & set(rows[0]))
 
 
+    def test_resume_reuses_matching_validation_record(self):
+        # The pre-load pass re-tokenizes every unit (about 30 minutes on a 16,500-unit shard);
+        # a resume with an identical identity and runtime skips it.
+        outer, templated = self, []
+        class CountingTokenizer(FakeTokenizer):
+            chat_template = 'template v1'
+            def apply_chat_template(self, chat, **kwargs):
+                templated.append(chat)
+                return super().apply_chat_template(chat, **kwargs)
+        tokenizer = CountingTokenizer()
+        class FakeLLM:
+            def __init__(self, **kwargs):
+                pass
+            def chat(self, chats, **kwargs):
+                return [SimpleNamespace(prompt_token_ids=FakeTokenizer().apply_chat_template(
+                    chat, **kwargs['chat_template_kwargs']), outputs=[outer.answer()]) for chat in chats]
+        modules = {
+            'transformers': SimpleNamespace(AutoTokenizer=SimpleNamespace(from_pretrained=lambda *a, **k: tokenizer)),
+            'torch': SimpleNamespace(cuda=SimpleNamespace(device_count=lambda: 1, get_device_name=lambda i: 'fake'),
+                                     __version__='fake', version=SimpleNamespace(cuda='fake')),
+            'vllm': SimpleNamespace(LLM=FakeLLM, SamplingParams=lambda **k: k),
+            'vllm.sampling_params': SimpleNamespace(StructuredOutputsParams=lambda **k: k)}
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(sys.modules, modules), \
+                patch.object(r.signal, 'signal'), contextlib.redirect_stdout(io.StringIO()):
+            root = Path(tmp)
+            cfg, manifest = root/'config.json', root/'input.jsonl'
+            # A hub ID, not a directory: the record digests the tokenizer as loaded.
+            cfg.write_text(json.dumps({**self.cfg, 'model': 'Org/model'}))
+            manifest.write_text(''.join(json.dumps({'unit_id': str(i), 'chunk_idx': 0,
+                'text': 'evidence', 'text_sha256': r.digest(b'evidence')})+'\n' for i in range(2)))
+            argv = ['runner', '--config', str(cfg), '--input-manifest', str(manifest),
+                    '--output-dir', str(root/'outputs'), '--worker-id', '0']
+            record = root/'outputs/worker-0/validated.json'
+
+            def resume(expected, why):
+                templated.clear()
+                with patch.object(sys, 'argv', argv+['--resume']):
+                    r.main()
+                self.assertEqual(len(templated), expected, why)
+
+            with patch.object(sys, 'argv', argv+['--validate-only']):
+                r.main()
+            self.assertEqual(len(templated), 2)
+            self.assertFalse(record.exists())  # an explicit check writes no record
+            templated.clear()
+            with patch.object(sys, 'argv', argv):
+                r.main()
+            self.assertEqual(len(templated), 4)  # first run: the full pass, then generation
+            matching = record.read_text()
+            resume(0, 'everything committed and already validated')
+            with patch.object(sys, 'argv', argv+['--validate-only']):
+                r.main()
+            self.assertEqual(record.read_text(), matching)  # a check leaves the run's record alone
+            saved = json.loads(matching)
+            for change, why in [('{not json', 'an unreadable record'),
+                                (json.dumps({**saved, 'identity': 'other'}), 'another identity'),
+                                (json.dumps({**saved, 'runtime': {**saved['runtime'], 'python': 'other'}}),
+                                 'another runtime')]:
+                record.write_text(change)
+                resume(2, why)
+                self.assertEqual(record.read_text(), matching)
+            if os.geteuid() != 0:  # root reads a mode-0 file
+                record.chmod(0)
+                resume(2, 'a record the worker cannot read')
+                self.assertEqual(record.read_text(), matching)
+            tokenizer.chat_template = 'template edited'
+            resume(2, 'an edited chat template')
+            self.assertNotEqual(record.read_text(), matching)
+            resume(0, 'the new record matches')
+
+
 class EndTokenizer(FakeTokenizer):
     def encode(self, text, add_special_tokens=None):
         head, sep, tail = text.partition('</think>')

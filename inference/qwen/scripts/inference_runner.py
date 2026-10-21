@@ -470,6 +470,28 @@ def metrics_snapshot(llm, enabled=True):
     return {'available': True, 'preemptions': sum(preempt) if preempt else None, 'metrics': metrics}
 
 
+def runtime(tokenizer):
+    """Digests of the installed packages and of the tokenizer as loaded (class, options,
+    vocabulary and chat template), whatever files or hub cache it came from; a
+    validation record from another runtime is not reused."""
+    from importlib import metadata
+    packages = sorted(f'{(d.metadata["Name"] or "").lower()}=={d.version}' for d in metadata.distributions())
+    backend = getattr(tokenizer, 'backend_tokenizer', None)
+    loaded = {'class': type(tokenizer).__name__,
+              'options': getattr(tokenizer, 'init_kwargs', None),
+              'chat_template': getattr(tokenizer, 'chat_template', None),
+              'vocabulary': backend.to_str() if backend is not None else
+                            getattr(tokenizer, 'get_vocab', dict)()}
+    return {'python': sys.version, 'packages': digest(json.dumps(packages).encode()),
+            'tokenizer': digest(json.dumps(loaded, sort_keys=True, default=str).encode())}
+
+
+def recorded(path):
+    """A JSON record, or None when it is missing or unreadable."""
+    with contextlib.suppress(OSError, ValueError):
+        return json.loads(Path(path).read_text())
+
+
 def job_deadline(stop_at):
     """Earlier of the caller's absolute cutoff and the allocated Slurm end time."""
     deadline = float('inf')
@@ -539,7 +561,8 @@ def run(resources):
         validator_for(None)
     tokenizer = AutoTokenizer.from_pretrained(config['model'], local_files_only=True,
                                               trust_remote_code=False)
-    # Validate every selected unit before instantiating a GPU model.
+    # Validate every selected unit before instantiating a GPU model, unless this worker
+    # recorded a pass for the same identity and runtime (below).
     check_reasoning_end(config, tokenizer)
     end_ids = start_id = None
     if controls['budget'] is not None:
@@ -551,9 +574,16 @@ def run(resources):
         input_info[r['unit_id']] = fingerprint(r)
         per_unit = 'body' in r  # units() guarantees one row kind per manifest
     legacy = not per_unit and controls['attempts'] == 1
-    for batch in batches(units(args.fixtures, args.max_records), tokenizer, config, {}):
-        for row, _, _ in batch:
-            validator_for(row)
+    # The full pass tokenizes every unit (about 30 minutes on a 16,500-unit shard). A
+    # record for this identity and runtime proves it passed, so a resume skips it; the
+    # generation loop still checks each batch it renders.
+    validation_path = directory / 'validated.json'
+    validation = {'identity': identity, 'runtime': runtime(tokenizer)}
+    validated = not args.validate_only and recorded(validation_path) == validation
+    if not validated:
+        for batch in batches(units(args.fixtures, args.max_records), tokenizer, config, {}):
+            for row, _, _ in batch:
+                validator_for(row)
     if args.validate_only:
         print(json.dumps({'event': 'validated', 'units': len(input_info), 'identity': identity}), flush=True)
         return
@@ -567,6 +597,9 @@ def run(resources):
         if list(directory.glob('part-*.jsonl')):
             raise ValueError('Parts exist without identity')
         write_json(identity_path, {'identity': identity, **identity_data})
+    if not validated:
+        # Only the worker's own writer records a pass, after the lock and identity checks.
+        write_json(validation_path, validation)
     done = committed(directory, identity)
     if not set(done).issubset(input_info):
         raise ValueError('Committed IDs outside selected manifest')
