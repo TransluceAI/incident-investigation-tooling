@@ -362,6 +362,10 @@ class ReasoningTests(unittest.TestCase):
                 record.write_text(change)
                 resume(2, why)
                 self.assertEqual(record.read_text(), matching)
+            if os.geteuid() != 0:  # root reads a mode-0 file
+                record.chmod(0)
+                resume(2, 'a record the worker cannot read')
+                self.assertEqual(record.read_text(), matching)
             tokenizer.chat_template = 'template edited'
             resume(2, 'an edited chat template')
             self.assertNotEqual(record.read_text(), matching)
