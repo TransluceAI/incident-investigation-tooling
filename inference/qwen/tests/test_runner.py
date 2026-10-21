@@ -337,9 +337,12 @@ class ReasoningTests(unittest.TestCase):
 
             def resume(expected, why):
                 templated.clear()
-                with patch.object(sys, 'argv', argv+['--resume']):
+                with patch.object(sys, 'argv', argv+['--resume']), \
+                        contextlib.redirect_stdout(io.StringIO()) as out:
                     r.main()
                 self.assertEqual(len(templated), expected, why)
+                events = [json.loads(line) for line in out.getvalue().splitlines() if line.startswith('{')]
+                self.assertEqual([e['reused'] for e in events if e['event'] == 'validation'], [expected == 0], why)
 
             with patch.object(sys, 'argv', argv+['--validate-only']):
                 r.main()
