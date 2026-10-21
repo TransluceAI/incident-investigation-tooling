@@ -11,8 +11,8 @@ This is exploratory evidence triage. Labels require human review, and source-loc
 ```text
 config/                 Judge rubric, JSON schema, and engine settings template
 src/arquivo_judge/      Event ledger, inert decoding, evidence rendering, reporting
-scripts/audit.py        Prepared-input coverage and assignment checks
-scripts/shard_all.py    All corpus windows assigned once across eight shards
+scripts/audit.py        Prepared-input coverage and shard-assignment checks
+scripts/shard_all.py    All corpus windows assigned once across GPU shards (default eight)
 scripts/inference_runner.py
                         Shared vLLM inference runner
 scripts/run.sbatch      Portable Slurm launcher for those eight shards
@@ -34,7 +34,7 @@ python -m pip install -e '.[prepare]'   # Also prepare inputs with Transformers
 python -m pip install -e '.[gpu]'
 ```
 
-Place the model weights and tokenizer in a local directory. Copy `config/engine.example.json` to `config/engine.local.json` and set `model` to that directory's absolute path. Preparation and the runner use local model files only. The example preserves the completed run's engine and sampling settings; other models or hardware may require different settings and validation.
+Place the model weights and tokenizer in a local directory. Copy `config/engine.example.json` to `config/engine.local.json` and set `model` to that directory's absolute path. Preparation and the runner use local model files only. The example preserves the completed run's engine and sampling settings; other models or hardware may require different settings and validation. Preparation sizes input windows to `min(160000, max_model_len - sampling.max_tokens)` tokens and records the result as `window_budget` in `prepared/config.json`; set `window_budget` in the engine file to lower it.
 
 ## Prepare and run
 
@@ -52,15 +52,15 @@ export JUDGE_PYTHON="$(command -v python)"
   --rubric config/rubric.txt --schema config/schema.json \
   --out "$PREPARED_DIR"
 
-"$JUDGE_PYTHON" scripts/audit.py "$PREPARED_DIR"
 "$JUDGE_PYTHON" scripts/shard_all.py \
   --run "$PREPARED_DIR" --out "$PREPARED_DIR/full-shards"
+"$JUDGE_PYTHON" scripts/audit.py "$PREPARED_DIR"
 
 mkdir -p runs/full/logs
 sbatch --export=ALL --output="$PWD/runs/full/logs/%A_%a.log" scripts/run.sbatch
 ```
 
-Use fresh preparation and output paths for each new experiment. `shard_all.py` includes every canonical corpus window exactly once and excludes synthetic controls. The commands here do not evaluate the synthetic controls: `controls: []` and `controls_passed: 0` in the report mean no controls were run. Choose any partition/account options required by your cluster when submitting. Preparation, sharding, auditing, and the launcher use a fixed layout of eight single-GPU workers; changing only the Slurm array does not change the shard count. The model and Python environment must be accessible from every worker.
+Use fresh preparation and output paths for each new experiment. `shard_all.py` includes every canonical corpus window exactly once and excludes synthetic controls; `audit.py` then checks character coverage and that `full-shards/` assigns every window exactly once, and fails with a message rather than an `assert`. The commands here do not evaluate the synthetic controls: `controls: []` and `controls_passed: 0` in the report mean no controls were run, and `ignored_control_outputs` counts control outputs left out of a report. `prepare` also writes `pilot.jsonl` and `shard-N.jsonl` for a pilot workflow; the commands here do not run them. Choose any partition/account options required by your cluster when submitting. `shard_all.py --shards N` (default 8) sets the number of single-GPU workers; submit the launcher with a matching array, e.g. `sbatch --array=0-$((N-1)) ...`. The model and Python environment must be accessible from every worker.
 
 For a single GPU, run one shard directly instead:
 
@@ -71,7 +71,7 @@ For a single GPU, run one shard directly instead:
   --output-dir "$OUTPUT_DIR" --worker-id 0 --resume
 ```
 
-That command covers shard 0 only. Run the other shards to complete the corpus. Each worker expects exactly one visible CUDA device. Resume interrupted work only after the previous worker exits; configuration, manifest, and runner identities must match. Resume skips all committed rows, including failures. Automated retries and result replacement are not supported; reporting rejects duplicate window IDs across output directories.
+That command covers shard 0 only. Run the other shards to complete the corpus. Each worker expects exactly one visible CUDA device. Resume interrupted work only after the previous worker exits; configuration, manifest, and runner identities must match. Resume skips all committed rows, including failures. Automated retries and result replacement are not supported; reporting rejects duplicate window IDs across output directories, and outputs whose runner identity does not match the prepared run's `config.json`.
 
 ## Report
 
@@ -83,10 +83,10 @@ python -m arquivo_judge.pipeline report \
   --outputs "$OUTPUT_DIR" --out runs/full/report
 ```
 
-- `summary.json`: event/window counts, validation status, and token totals.
+- `summary.json`: event/window counts, validation status, preparation gap counts, and token totals.
 - `judgments.jsonl`: every committed judgment, including validation failures.
 - `predictions.jsonl`: validated judgments with extracted source locations.
-- `event-results.jsonl`: event-level assessments and completion status.
+- `event-results.jsonl`: event-level assessments and completion status. An event with a capture that could not be read (`unreadable_captures`) is never complete.
 - `review-queue.jsonl`: positive windows, including explicitly unverified positives, sorted by descending `hacking_confidence` (0–1). Higher scores mean stronger model-estimated evidence of a hacking attempt; they are not calibrated probabilities or confidence in a negative label. Validation status remains explicit regardless of score.
 - `failures.jsonl`, `pending.jsonl`, `unverified-candidates.jsonl`: exceptions kept visible rather than treated as negatives.
 
@@ -110,7 +110,7 @@ Supported kinds:
 - `arquivo_capture`: stored response text with `metadata.original_url` and `metadata.capture_timestamp` (also accepted under `original_record.metadata`).
 - `provider_redirect`: `source_url` identifies an archive replay URL; its document stores the redirect destination as text.
 
-Records may also carry `scope`, `time_basis`, and `raw_path` provenance. Malformed or unsupported observations are recorded as gaps. See `examples/corpus/` for a synthetic index and response body; it illustrates the format, not judge accuracy.
+Records may also carry `scope`, `time_basis`, and `raw_path` provenance. Malformed or unsupported observations (unparseable lines, missing IDs, fields of the wrong type, captures without metadata, documents that cannot be read, empty redirects) are recorded in `gaps.jsonl` and skipped. A capture whose text is missing, has no hash, or cannot be read keeps its event: the model sees `BODY: unreadable`, and the event is reported incomplete, never negative. Duplicate observation IDs and documents that do not match their recorded hash stop preparation. See `examples/corpus/` for a synthetic index and response body; it illustrates the format, not judge accuracy.
 
 ## Recorded results
 

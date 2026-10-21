@@ -19,6 +19,11 @@ def make_event_id(url: str, ts: str) -> str:
     return sha256_text(f"{PROVIDER}|{url}|{ts}")[:24]
 
 
+def capture_metadata(rec):
+    meta = rec.get("metadata") or (rec.get("original_record") or {}).get("metadata") or {}
+    return meta if isinstance(meta, dict) else {}
+
+
 @dataclass
 class Ledger:
     events: dict = field(default_factory=dict)
@@ -34,7 +39,7 @@ def _event(ledger, url, ts):
     ev = ledger.events.get(eid)
     if ev is None:
         ev = {"event_id": eid, "provider": PROVIDER, "original_url": url, "capture_timestamp": ts,
-              "cdx": [], "body": None, "extra_bodies": [], "redirects": [], "observation_ids": [],
+              "cdx": [], "body": None, "extra_bodies": [], "body_gaps": [], "redirects": [], "observation_ids": [],
               "scope_labels": [], "time_basis": []}
         ledger.events[eid] = ev
     return ev
@@ -65,6 +70,8 @@ def build_ledger(records, read_text) -> Ledger:
             ledger.observation_map.append({"observation_id": rec.get("observation_id"), "kind": rec.get("kind"),
                                            "disposition": "parse_error", "event_ids": []})
     for rec in by_kind["arquivo_index"]:
+        if not rec.get("document_path"):
+            ledger.gaps.append({"observation_id": rec["observation_id"], "gap": "index_missing_document"})
         linked = []
         for row_no, line in enumerate(_read(read_text, rec).splitlines(), 1):
             if not line.strip():
@@ -86,14 +93,25 @@ def build_ledger(records, read_text) -> Ledger:
         ledger.observation_map.append({"observation_id": rec["observation_id"], "kind": "arquivo_index",
                                        "disposition": "index_container", "event_ids": sorted(set(linked))})
     for rec in by_kind["arquivo_capture"]:
-        meta = rec.get("metadata") or rec.get("original_record", {}).get("metadata") or {}
+        meta = capture_metadata(rec)
         url, ts = meta.get("original_url"), meta.get("capture_timestamp")
-        if not url or not ts:
+        if not isinstance(url, str) or not isinstance(ts, str) or not url or not ts:
             ledger.gaps.append({"observation_id": rec["observation_id"], "gap": "capture_missing_metadata"})
             ledger.observation_map.append({"observation_id": rec["observation_id"], "kind": "arquivo_capture",
                                            "disposition": "parse_error", "event_ids": []})
             continue
         ev = _event(ledger, url, ts)
+        if not rec.get("document_path"):
+            rec = {**rec, "body_gap": "capture_missing_document"}
+            ledger.gaps.append({"observation_id": rec["observation_id"], "gap": rec["body_gap"], "event_id": ev["event_id"]})
+        if rec.get("body_gap"):
+            # The capture exists but its text is missing, unreadable or unverified: keep
+            # the event (its URL is still evidence) and record why it has no body.
+            ev["body_gaps"].append({"observation_id": rec["observation_id"], "gap": rec["body_gap"]})
+            _note(ev, rec)
+            ledger.observation_map.append({"observation_id": rec["observation_id"], "kind": "arquivo_capture",
+                                           "disposition": "unreadable_capture", "event_ids": [ev["event_id"]]})
+            continue
         body = {"observation_id": rec["observation_id"], "document_path": rec.get("document_path"),
                 "text_sha256": rec.get("text_sha256"), "raw_path": rec.get("raw_path"), "cdx_digest": meta.get("cdx_digest")}
         if ev["body"] is None:
