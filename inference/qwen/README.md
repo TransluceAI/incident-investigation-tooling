@@ -238,7 +238,14 @@ After the previous job exits:
 Resume uses the saved code, config and Python path, verifies the saved run-file
 hashes at submission (each task verifies its input shard at job start), and
 refuses to overlap a recorded active job. Committed parts are skipped;
-an interrupted uncommitted batch may be recomputed. Changed model, config, code,
+an interrupted uncommitted batch may be recomputed. Before loading the model, a
+worker validates every selected unit, which tokenizes the whole shard; after it
+passes, `outputs/worker-*/validated.json` records the run identity, the runtime
+versions and hashes of the model's tokenizer and chat-template files, and a
+resume with the same record skips that pass. `--validate-only`
+always validates and writes the record in its own output directory, so copying a
+preflight's record into a new run's worker directory also skips the pass at first
+launch. A record that does not match is ignored. Changed model, config, code,
 or input requires a new run directory. The launcher records the Python path,
 not a hash of the full runtime/model contents; those must not be modified in place.
 Directory aliases are resolved at submission so switching a release symlink does

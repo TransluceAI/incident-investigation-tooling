@@ -470,6 +470,32 @@ def metrics_snapshot(llm, enabled=True):
     return {'available': True, 'preemptions': sum(preempt) if preempt else None, 'metrics': metrics}
 
 
+TOKENIZER_FILES = ('tokenizer', 'chat_template', 'special_tokens_map', 'added_tokens', 'vocab', 'merges')
+
+
+def runtime(model):
+    """Interpreter, validation libraries and the model's tokenizer and chat-template files;
+    a validation record from another runtime is not reused."""
+    from importlib import metadata
+    versions = {}
+    for name in ('transformers', 'tokenizers', 'jinja2', 'jsonschema'):
+        try:
+            versions[name] = metadata.version(name)
+        except metadata.PackageNotFoundError:
+            versions[name] = None
+    files = {}
+    with contextlib.suppress(FileNotFoundError, NotADirectoryError):
+        files = {p.name: file_hash(p) for p in sorted(Path(model).iterdir())
+                 if p.is_file() and p.name.startswith(TOKENIZER_FILES)}
+    return {'python': sys.version, 'executable': sys.executable, **versions, 'tokenizer_files': files}
+
+
+def recorded(path):
+    """A JSON record, or None when it is missing or unreadable."""
+    with contextlib.suppress(FileNotFoundError, ValueError):
+        return json.loads(Path(path).read_text())
+
+
 def job_deadline(stop_at):
     """Earlier of the caller's absolute cutoff and the allocated Slurm end time."""
     deadline = float('inf')
@@ -551,9 +577,16 @@ def run(resources):
         input_info[r['unit_id']] = fingerprint(r)
         per_unit = 'body' in r  # units() guarantees one row kind per manifest
     legacy = not per_unit and controls['attempts'] == 1
-    for batch in batches(units(args.fixtures, args.max_records), tokenizer, config, {}):
-        for row, _, _ in batch:
-            validator_for(row)
+    # The full pass tokenizes every unit (about 30 minutes on a 16,500-unit shard). A
+    # record for this identity and runtime proves it passed, so a resume skips it; the
+    # generation loop still checks each batch it renders.
+    validation_path = directory / 'validated.json'
+    validation = {'identity': identity, 'units': len(input_info), 'runtime': runtime(config['model'])}
+    if args.validate_only or recorded(validation_path) != validation:
+        for batch in batches(units(args.fixtures, args.max_records), tokenizer, config, {}):
+            for row, _, _ in batch:
+                validator_for(row)
+        write_json(validation_path, validation)
     if args.validate_only:
         print(json.dumps({'event': 'validated', 'units': len(input_info), 'identity': identity}), flush=True)
         return

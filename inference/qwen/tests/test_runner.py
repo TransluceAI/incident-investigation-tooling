@@ -301,6 +301,71 @@ class ReasoningTests(unittest.TestCase):
             self.assertFalse({'attempt', 'previous_attempts', 'thinking_budget_exhausted'} & set(rows[0]))
 
 
+    def test_resume_reuses_matching_validation_record(self):
+        # The pre-load pass re-tokenizes every unit (about 30 minutes on a 16,500-unit shard);
+        # a resume with an identical identity and runtime skips it.
+        tokenizer, outer = self.tokenizer, self
+        templated = []
+        class CountingTokenizer(FakeTokenizer):
+            def apply_chat_template(self, chat, **kwargs):
+                templated.append(chat)
+                return super().apply_chat_template(chat, **kwargs)
+        tokenizer = CountingTokenizer()
+        class FakeLLM:
+            def __init__(self, **kwargs):
+                pass
+            def chat(self, chats, **kwargs):
+                return [SimpleNamespace(prompt_token_ids=FakeTokenizer().apply_chat_template(
+                    chat, **kwargs['chat_template_kwargs']), outputs=[outer.answer()]) for chat in chats]
+        modules = {
+            'transformers': SimpleNamespace(AutoTokenizer=SimpleNamespace(from_pretrained=lambda *a, **k: tokenizer)),
+            'torch': SimpleNamespace(cuda=SimpleNamespace(device_count=lambda: 1, get_device_name=lambda i: 'fake'),
+                                     __version__='fake', version=SimpleNamespace(cuda='fake')),
+            'vllm': SimpleNamespace(LLM=FakeLLM, SamplingParams=lambda **k: k),
+            'vllm.sampling_params': SimpleNamespace(StructuredOutputsParams=lambda **k: k)}
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(sys.modules, modules), \
+                patch.object(r.signal, 'signal'), contextlib.redirect_stdout(io.StringIO()):
+            root = Path(tmp)
+            cfg, manifest, model = root/'config.json', root/'input.jsonl', root/'model'
+            model.mkdir()
+            (model/'chat_template.jinja').write_text('template v1')
+            (model/'model.safetensors').write_text('weights are not hashed')
+            cfg.write_text(json.dumps({**self.cfg, 'model': str(model)}))
+            manifest.write_text(''.join(json.dumps({'unit_id': str(i), 'chunk_idx': 0,
+                'text': 'evidence', 'text_sha256': r.digest(b'evidence')})+'\n' for i in range(2)))
+            argv = ['runner', '--config', str(cfg), '--input-manifest', str(manifest),
+                    '--output-dir', str(root/'outputs'), '--worker-id', '0']
+            record = root/'outputs/worker-0/validated.json'
+            with patch.object(sys, 'argv', argv+['--validate-only']):
+                r.main()
+            self.assertTrue(record.exists())
+            templated.clear()
+            with patch.object(sys, 'argv', argv+['--validate-only']):
+                r.main()
+            self.assertEqual(len(templated), 2)  # an explicit check always validates
+            with patch.object(sys, 'argv', argv):
+                r.main()
+            self.assertEqual(len(templated), 4)  # first run: the generation pass only
+            templated.clear()
+            with patch.object(sys, 'argv', argv+['--resume']):
+                r.main()
+            self.assertEqual(templated, [])  # everything committed and already validated
+            stale = json.loads(record.read_text())
+            stale['runtime']['python'] = 'other'
+            record.write_text(json.dumps(stale))
+            with patch.object(sys, 'argv', argv+['--resume']):
+                r.main()
+            self.assertEqual(len(templated), 2)  # a changed runtime validates again
+            self.assertEqual(json.loads(record.read_text())['runtime']['python'], sys.version)
+            self.assertEqual(set(json.loads(record.read_text())['runtime']['tokenizer_files']),
+                             {'chat_template.jinja'})
+            (model/'chat_template.jinja').write_text('template edited in place')
+            templated.clear()
+            with patch.object(sys, 'argv', argv+['--resume']):
+                r.main()
+            self.assertEqual(len(templated), 2)  # an edited chat template validates again
+
+
 class EndTokenizer(FakeTokenizer):
     def encode(self, text, add_special_tokens=None):
         head, sep, tail = text.partition('</think>')
