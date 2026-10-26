@@ -1,5 +1,6 @@
 import json
 import os
+import pickle
 import signal
 import tempfile
 import time
@@ -9,12 +10,20 @@ from pathlib import Path
 from unittest import mock
 
 from screening_judge.common import iter_jsonl, sha256_text, write_jsonl
-from screening_judge.prepare import prepare, usable_cpus
+from screening_judge.prepare import _prepare_range, prepare, usable_cpus
 from test_pipeline import config
 
 
 def count(chat):
     return sum(len(m['content']) for m in chat) // 3
+
+
+def measured_range(bounds):
+    """_prepare_range that appends its pickled result size to $PREPARE_RESULT_SIZES (runs in the workers)."""
+    result = _prepare_range(bounds)
+    with open(os.environ['PREPARE_RESULT_SIZES'], 'a') as sizes:
+        sizes.write(f'{len(pickle.dumps(result))}\n')
+    return result
 
 
 class ParallelPrepareTests(unittest.TestCase):
@@ -82,6 +91,18 @@ class ParallelPrepareTests(unittest.TestCase):
         self.assertEqual(cpus(SLURM_CPUS_PER_TASK='3', SLURM_CPUS_ON_NODE='2'), min(2, mask))
         for value in (str(mask + 50), '', 'x', '0'):
             self.assertEqual(cpus(SLURM_CPUS_PER_TASK=value), mask, value)
+
+    def test_worker_results_fit_one_atomic_pipe_write(self):
+        # A result over 16 KiB goes over the pipe as two writes; a worker killed between them hangs the
+        # executor's reader. Under PIPE_BUF (512 on macOS, 4096 on Linux) a write lands whole or not at all.
+        sizes_file = self.root / 'sizes.txt'
+        with mock.patch.dict(os.environ, {'PREPARE_RESULT_SIZES': str(sizes_file)}), \
+                mock.patch('screening_judge.prepare._prepare_range', measured_range):
+            summary = self.run_prepare('parallel', workers=3)
+        sizes = [int(s) for s in sizes_file.read_text().split()]
+        self.assertEqual(len(sizes), 14)  # one range per item at this corpus size
+        self.assertLessEqual(max(sizes), 64)
+        self.assertEqual(summary, self.run_prepare('serial'))
 
     def test_workers_need_python_312(self):
         with mock.patch('screening_judge.prepare.sys.version_info', (3, 11, 9)):

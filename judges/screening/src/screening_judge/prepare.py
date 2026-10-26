@@ -17,6 +17,7 @@ import gc
 import json
 import multiprocessing
 import os
+import pickle
 import secrets
 import shutil
 import sys
@@ -356,6 +357,11 @@ def _prepare_parallel(items, corpus, gaps, config, count, window_tokens, coverag
     been, so the first failure surfaces at once; the remaining workers are then
     stopped rather than awaited. A worker killed outright (for example by the OOM
     killer) raises BrokenProcessPool.
+
+    A task sends back only its window count; everything else goes through part
+    files. A result over 16 KiB is sent as two pipe writes, and a worker killed
+    between them leaves a partial message that blocks the executor's reader for
+    good, whereas a message under PIPE_BUF is written whole or not at all.
     """
     size = -(-len(items) // (workers * 16))
     ranges = [(lo, min(lo + size, len(items))) for lo in range(0, len(items), size)]
@@ -372,7 +378,11 @@ def _prepare_parallel(items, corpus, gaps, config, count, window_tokens, coverag
         for future in as_completed(futures):
             finished[futures[future]] = future.result()
             while merged in finished:
-                (lo, hi), (n, item_shapes, hashes, part_coverage, part_gaps) = ranges[merged], finished.pop(merged)
+                (lo, hi), n = ranges[merged], finished.pop(merged)
+                meta = parts / f"{lo}.meta.pkl"
+                with open(meta, "rb") as src:
+                    item_shapes, hashes, part_coverage, part_gaps = pickle.load(src)
+                meta.unlink()
                 for item, shape in zip(items[lo:hi], item_shapes):
                     item["shape"] = shape  # text items take their detected shape in _prepare_item
                 corpus.hashes.update(hashes)
@@ -419,7 +429,7 @@ def _init_worker(state):
 
 
 def _prepare_range(bounds):
-    """One worker task: prepare items[lo:hi] into part files; return what the parent merges."""
+    """One worker task: prepare items[lo:hi] into part files, metadata included; return the window count."""
     items, root, config, count, window_tokens, parts, heaviest = _worker_state
     lo, hi = bounds
     corpus, gaps, coverage, n_windows = Corpus(root), [], [], 0
@@ -429,7 +439,9 @@ def _prepare_range(bounds):
         for item in items[lo:hi]:
             n_windows += _prepare_item(item, corpus, gaps, config, count, window_tokens,
                                        put_window, put_request, coverage, heaviest=heaviest)
-    return n_windows, [item["shape"] for item in items[lo:hi]], corpus.hashes, coverage, gaps
+    with open(parts / f"{lo}.meta.pkl", "wb") as meta:
+        pickle.dump(([item["shape"] for item in items[lo:hi]], corpus.hashes, coverage, gaps), meta)
+    return n_windows
 
 
 def _prepare_item(item, corpus, gaps, config, count, window_tokens, put_window, put_request, coverage,
