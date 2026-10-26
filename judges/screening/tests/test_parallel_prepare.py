@@ -67,13 +67,27 @@ class ParallelPrepareTests(unittest.TestCase):
                 parallel = self.run_prepare('parallel', workers=3)
         self.assertEqual(parallel, serial)
 
-    def test_slurm_cpus_per_task_caps_usable_cpus(self):
-        with mock.patch.dict(os.environ, clear=False):
-            os.environ.pop('SLURM_CPUS_PER_TASK', None)
-            mask = usable_cpus()
-        for value, expected in (('1', 1), (str(mask + 50), mask), ('', mask), ('x', mask), ('0', mask)):
-            with mock.patch.dict(os.environ, {'SLURM_CPUS_PER_TASK': value}):
-                self.assertEqual(usable_cpus(), expected, value)
+    def test_slurm_allocation_caps_usable_cpus(self):
+        def cpus(**env):
+            with mock.patch.dict(os.environ):
+                for name in ('SLURM_CPUS_PER_TASK', 'SLURM_CPUS_ON_NODE'):
+                    os.environ.pop(name, None)
+                os.environ.update(env)
+                return usable_cpus()
+        mask = cpus()
+        if mask is None:
+            self.skipTest('CPU count unknown on this platform')
+        self.assertEqual(cpus(SLURM_CPUS_PER_TASK='1'), 1)
+        self.assertEqual(cpus(SLURM_CPUS_ON_NODE='1'), 1)
+        self.assertEqual(cpus(SLURM_CPUS_PER_TASK='3', SLURM_CPUS_ON_NODE='2'), min(2, mask))
+        for value in (str(mask + 50), '', 'x', '0'):
+            self.assertEqual(cpus(SLURM_CPUS_PER_TASK=value), mask, value)
+
+    def test_workers_need_python_312(self):
+        with mock.patch('screening_judge.prepare.sys.version_info', (3, 11, 9)):
+            with self.assertRaisesRegex(ValueError, 'Python 3.12'):
+                self.run_prepare('old', workers=2)
+            self.run_prepare('serial')  # one process is unaffected
 
     def test_a_failing_worker_publishes_no_requests(self):
         def failing(chat):

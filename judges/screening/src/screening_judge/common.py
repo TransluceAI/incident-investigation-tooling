@@ -1,4 +1,5 @@
 """Hashing, UTC time and atomic file helpers shared by every module."""
+import contextlib
 import hashlib
 import json
 import os
@@ -31,13 +32,14 @@ def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _atomic_write(path, write) -> None:
-    """write(stream) -> flush -> fsync -> rename on the same filesystem, then fsync the directory."""
+@contextlib.contextmanager
+def atomic_stream(path, mode="w", **open_kwargs):
+    """Yield a stream on path.tmp; after a clean finish flush, fsync, rename onto path, then fsync the directory."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(path.name + ".tmp")
-    with open(tmp, "w", encoding="utf-8") as out:
-        write(out)
+    with open(tmp, mode, **open_kwargs) as out:
+        yield out
         out.flush()
         os.fsync(out.fileno())
     os.replace(tmp, path)
@@ -46,6 +48,11 @@ def _atomic_write(path, write) -> None:
         os.fsync(fd)
     finally:
         os.close(fd)
+
+
+def _atomic_write(path, write) -> None:
+    with atomic_stream(path, "w", encoding="utf-8") as out:
+        write(out)
 
 
 def atomic_write_text(path, text: str) -> None:

@@ -19,6 +19,7 @@ import multiprocessing
 import os
 import secrets
 import shutil
+import sys
 import warnings
 from collections import Counter
 from concurrent.futures import ProcessPoolExecutor, as_completed
@@ -27,7 +28,7 @@ from pathlib import Path
 from typing import Callable
 
 from . import arquivo_ledger, benchmark, controls, records, shapes
-from .common import atomic_write_text, sha256_file, sha256_text, write_jsonl
+from .common import atomic_stream, atomic_write_text, sha256_file, sha256_text, write_jsonl
 from .prompts import load_prompts, messages, schemas
 from .render import render_citable, windows
 from .schemas import AXES, citation_schema
@@ -53,27 +54,24 @@ class Corpus:
         return text
 
 
-@contextlib.contextmanager
 def published(path):
     """Write path.tmp; publish it atomically only after a clean finish."""
-    path = Path(path)
-    tmp = path.with_name(path.name + ".tmp")
-    with open(tmp, "wb") as stream:
-        yield stream
-        stream.flush()
-        os.fsync(stream.fileno())
-    os.replace(tmp, path)
+    return atomic_stream(path, "wb")
 
 
 def jsonl_line(row):
     return (json.dumps(row, ensure_ascii=False) + "\n").encode("utf-8")
 
 
+def jsonl_writer(stream):
+    return lambda row: stream.write(jsonl_line(row))
+
+
 @contextlib.contextmanager
 def jsonl_stream(path):
     """Append rows to path.tmp; publish atomically only after a clean finish."""
     with published(path) as stream:
-        yield lambda row: stream.write(jsonl_line(row))
+        yield jsonl_writer(stream)
 
 
 def _new_item(item_id, source, shape):
@@ -217,16 +215,19 @@ def item_bodies(item, corpus, gaps):
 
 
 def usable_cpus():
-    """CPUs this process may use: its affinity mask where the OS has one, capped by a Slurm --cpus-per-task.
+    """CPUs this process may use: its affinity mask where the OS has one, capped by the job's Slurm allocation.
 
     The cap matters where Slurm does not fence a job's cores (ConstrainCores=no), so the mask can cover the
-    whole node while the job was allocated fewer CPUs.
+    whole node while the job was allocated fewer CPUs. SLURM_CPUS_ON_NODE is set in every job;
+    SLURM_CPUS_PER_TASK only when --cpus-per-task was given.
     """
-    cpus = len(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity") else os.cpu_count()
-    slurm = os.environ.get("SLURM_CPUS_PER_TASK", "")
-    if slurm.isdigit() and int(slurm) > 0:
-        cpus = min(cpus, int(slurm)) if cpus else int(slurm)
-    return cpus
+    counts = [len(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity") else os.cpu_count()]
+    for name in ("SLURM_CPUS_PER_TASK", "SLURM_CPUS_ON_NODE"):
+        value = os.environ.get(name, "")
+        if value.isdigit() and int(value) > 0:
+            counts.append(int(value))
+    counts = [c for c in counts if c]
+    return min(counts) if counts else None
 
 
 def prepare(data_root, out, count, window_tokens, config_template, with_controls=True, shards=1,
@@ -235,6 +236,10 @@ def prepare(data_root, out, count, window_tokens, config_template, with_controls
         raise ValueError("window_tokens and shards must be positive")
     if type(workers) is not int or workers < 1:
         raise ValueError("workers must be a positive integer")
+    if workers > 1 and sys.version_info < (3, 12):
+        # Before 3.12 a fork-context ProcessPoolExecutor forks a worker on each submit() while its manager
+        # thread is already running, which can deadlock the child (python/cpython#90622).
+        raise ValueError("workers > 1 needs Python 3.12 or later")
     cpus = usable_cpus()
     if cpus and workers > cpus:
         warnings.warn(f"workers={workers} exceeds the {cpus} CPUs this process may use; "
@@ -262,8 +267,7 @@ def prepare(data_root, out, count, window_tokens, config_template, with_controls
         raise ValueError("No judgeable records found; refusing an empty corpus run")
     coverage, n_windows, heaviest = [], 0, {}
     with published(out / "windows.jsonl") as window_stream, published(out / "requests.jsonl") as request_stream:
-        put_window = lambda row: window_stream.write(jsonl_line(row))
-        put_request = lambda row: request_stream.write(jsonl_line(row))
+        put_window, put_request = jsonl_writer(window_stream), jsonl_writer(request_stream)
         if workers > 1:
             n_windows += _prepare_parallel(items, corpus, gaps, config, count, window_tokens, coverage,
                                            workers, out / ".parts", window_stream, request_stream)
@@ -357,11 +361,13 @@ def _prepare_parallel(items, corpus, gaps, config, count, window_tokens, coverag
     ranges = [(lo, min(lo + size, len(items))) for lo in range(0, len(items), size)]
     parts.mkdir()
     n_windows, finished, merged = 0, {}, 0
-    gc.freeze()  # keep collections in the forked workers from copying every inherited page
     pool = ProcessPoolExecutor(min(workers, len(ranges)), mp_context=multiprocessing.get_context("fork"),
                                initializer=_init_worker,
                                initargs=((items, corpus.root, config, count, window_tokens, parts),))
     try:
+        # Fork workers are launched by the first submit, not the constructor, so freezing here still precedes
+        # the fork; it keeps collections in the workers from copying every inherited page.
+        gc.freeze()
         futures = {pool.submit(_prepare_range, bounds): idx for idx, bounds in enumerate(ranges)}
         for future in as_completed(futures):
             finished[futures[future]] = future.result()
@@ -419,8 +425,7 @@ def _prepare_range(bounds):
     corpus, gaps, coverage, n_windows = Corpus(root), [], [], 0
     with open(parts / f"{lo}.windows.jsonl", "wb") as windows_out, \
             open(parts / f"{lo}.requests.jsonl", "wb") as requests_out:
-        put_window = lambda row: windows_out.write(jsonl_line(row))
-        put_request = lambda row: requests_out.write(jsonl_line(row))
+        put_window, put_request = jsonl_writer(windows_out), jsonl_writer(requests_out)
         for item in items[lo:hi]:
             n_windows += _prepare_item(item, corpus, gaps, config, count, window_tokens,
                                        put_window, put_request, coverage, heaviest=heaviest)
