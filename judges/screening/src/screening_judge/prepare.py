@@ -35,7 +35,7 @@ from .prompts import load_prompts, messages, schemas
 from .render import render_citable, windows
 from .schemas import AXES, citation_schema
 
-VERSION = "screening-judge-v4"
+VERSION = "screening-judge-v5"
 # Profile keys the judge consumes; the runner receives only engine/sampling settings.
 NOT_FOR_RUNNER = {"system_prompt", "schema", "citation_constraints", "token_count_mode"}
 
@@ -79,15 +79,17 @@ def jsonl_stream(path):
 def _new_item(item_id, source, shape):
     return {"item_id": item_id, "source": source, "shape": shape, "kinds": set(),
             "observations": [], "time_basis": set(), "request_urls": [], "documents": [],
-            "redirects": []}
+            "redirects": [], "prompt_omitted_fields": set()}
 
 
 def _observe(item, rec):
     item["kinds"].add(str(rec.get("kind")))
     if rec.get("time_basis"):
         item["time_basis"].add(str(rec["time_basis"]))
+    prompt_line, omitted = records.prompt_provenance(rec)
+    item["prompt_omitted_fields"].update(omitted)
     obs = {"observation_id": rec["observation_id"], "kind": rec.get("kind"),
-           "line": records.provenance_line(rec)}
+           "line": records.provenance_line(rec), "prompt_line": prompt_line}
     location = records.import_location(rec, item["source"])
     if location:
         obs["import_location"] = location
@@ -282,8 +284,9 @@ def prepare(data_root, out, count, window_tokens, config_template, with_controls
                 items.append(item)
                 n_windows += _prepare_item(item, corpus, gaps, config, count, window_tokens,
                                            put_window, put_request, coverage, bodies, heaviest=heaviest)
-    item_rows = [{**{k: v for k, v in i.items() if k not in ("kinds", "time_basis")},
+    item_rows = [{**{k: v for k, v in i.items() if k not in ("kinds", "time_basis", "prompt_omitted_fields")},
                   "kinds": sorted(i["kinds"]), "time_basis": sorted(i["time_basis"]),
+                  "prompt_omitted_fields": sorted(i.get("prompt_omitted_fields", ())),
                   "text_sha256s": sorted({d[1] or corpus.hashes.get(d[0]) for d in i["documents"]
                                           if d[1] or corpus.hashes.get(d[0])})} for i in items]
     write_jsonl(out / "items.jsonl", item_rows)
@@ -298,6 +301,8 @@ def prepare(data_root, out, count, window_tokens, config_template, with_controls
                "windowed_items": sum(len(c["windows"]) > 1 for c in coverage),
                "excluded_integrity": sum(c["status"] == "excluded_integrity" for c in coverage),
                "gaps": dict(Counter(g["gap"] for g in gaps)),
+               # Field names left out of prompts, by source: a new source's evidence field shows up here.
+               "prompt_omitted_fields": _omitted_by_source(items),
                "config_sha256": sha256_file(out / "config.json"),
                "artifact_hashes": {name: sha256_file(out / name) for name in
                                    ("requests.jsonl", "engine.json", "windows.jsonl", "items.jsonl",
@@ -308,6 +313,14 @@ def prepare(data_root, out, count, window_tokens, config_template, with_controls
         summary["shard_characters"] = loads
     atomic_write_text(out / "preparation.json", json.dumps(summary, indent=2) + "\n")
     return summary
+
+
+def _omitted_by_source(items):
+    counts = {}
+    for item in items:
+        for name in item.get("prompt_omitted_fields", ()):
+            counts.setdefault(item["source"], Counter())[name] += 1
+    return {source: dict(sorted(c.items())) for source, c in sorted(counts.items())}
 
 
 def runner_profile(config_template):

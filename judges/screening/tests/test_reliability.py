@@ -146,10 +146,31 @@ class ReliabilityTests(unittest.TestCase):
         self.assertEqual(sorted(u for i in items for u in i['request_urls']), sorted(targets))
 
     def test_redaction_rewrites_only_the_source_url_field(self):
-        self.prepare([self.record(collection_method='imported', source_url='data', note='metadata dump')])
+        self.prepare([self.record(collection_method='imported', source_url='data', title='metadata dump')])
         provenance = self.texts('PROVENANCE')[0]
-        self.assertIn('note=metadata dump', provenance)
+        self.assertIn('title=metadata dump', provenance)
         self.assertIn('source_url=[import location; kept in audit record]', provenance)
+
+    def test_prompt_provenance_keeps_activity_fields_and_omits_curator_notes(self):
+        meta = {'original_url': 'https://site.example/p', 'http_status': 403, 'comment': 'reverted edit',
+                'selection_basis': 'task_or_exchange_signal', 'not_an_agent_verdict': True,
+                'origin': {'kind': 'paste_candidate', 'response_quality': 'high'}}
+        summary = self.prepare([self.record(collection_run='agent-sources-20260930', scope='source_time_in_window',
+                                            source_time='2026-09-01', original_record={'metadata': meta})])
+        provenance = self.texts('PROVENANCE')[0]
+        for kept in ('kind=raw_paste', 'source_time=2026-09-01', 'metadata.original_url=https://site.example/p',
+                     'metadata.http_status=403', 'metadata.comment=reverted edit'):
+            self.assertIn(kept, provenance)
+        for hidden in ('agent-sources', 'source_time_in_window', 'task_or_exchange_signal',
+                       'not_an_agent_verdict', 'paste_candidate', 'response_quality'):
+            self.assertNotIn(hidden, provenance)
+        self.assertIn('[collection fields omitted: 6; kept in audit record]', provenance)
+        line = next(iter_jsonl(self.run/'items.jsonl'))['observations'][0]['line']
+        self.assertIn('metadata.selection_basis=task_or_exchange_signal', line)
+        self.assertIn('collection_run=agent-sources-20260930', line)
+        self.assertEqual(summary['prompt_omitted_fields'], {'sample': {
+            'collection_run': 1, 'metadata.not_an_agent_verdict': 1, 'metadata.origin': 1,
+            'metadata.selection_basis': 1, 'observation_id': 1, 'scope': 1}})
 
     def test_source_site_match_ignores_case(self):
         rec = {'collection_method': 'imported', 'source_url': 'https://www.example.com/page'}
