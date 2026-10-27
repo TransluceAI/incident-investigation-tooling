@@ -112,6 +112,23 @@ class ReliabilityTests(unittest.TestCase):
         evidence[0]['quote']+='\nGET /x HTTP/1.1'
         self.assertEqual(review_warnings({'actions':[a]},evidence),[])
 
+    def test_status_codes_absent_from_cited_text_are_flagged(self):
+        flag='status_not_in_cited_text_review'
+        evidence=[{'segment_id':'S2','chunk_id':1,'quote':'GET /admin HTTP/1.1\n40'},
+                  {'segment_id':'S2','chunk_id':2,'quote':'3 Forbidden'}]
+        res={**result('hacking'),'rationale':'The probe of /admin returned a 401.'}
+        self.assertIn(flag,review_warnings(res,evidence))
+        res['rationale']='The probe of /admin returned 403 Forbidden.'  # split across adjacent chunks
+        self.assertEqual(review_warnings(res,evidence),[])
+        res['actions']=[{'target':'admin panel','action':'retry ended in a 500 error'}]
+        self.assertIn(flag,review_warnings(res,evidence))
+        res['actions']=[{'target':'admin panel','action':'beacon to pie.dev/status/204 in 1200-char chunks'}]
+        self.assertEqual(review_warnings(res,evidence),[])  # URL paths and counts are not status claims
+        res['rationale']='The API answered with 403 PermissionDeniedException.'
+        evidence[:]=[{'segment_id':'S2','chunk_id':1,'quote':'request id 14031'}]
+        self.assertIn(flag,review_warnings(res,evidence))
+        self.assertEqual(review_warnings(res,[]),[])  # nothing cited, nothing to compare
+
     def texts(self, kind):
         w = next(iter_jsonl(self.run/'windows.jsonl'))
         return [''.join(w['text'][c['text_start']:c['text_end']] for c in w['evidence_chunks'][sid])
