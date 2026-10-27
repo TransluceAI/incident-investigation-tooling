@@ -1,12 +1,9 @@
 """A small synthetic data root covering every evidence shape (no real evidence)."""
 import base64
 import json
-import shutil
 import zlib
 from hashlib import sha256
 from pathlib import Path
-
-ARQUIVO_EXAMPLE = Path(__file__).resolve().parents[2] / "arquivo" / "examples" / "corpus"
 
 URLQUERY_REPORT = {
     "report_id": "r-1", "version": 1, "status": "done", "tags": [], "date": "2026-06-20T10:00:00Z",
@@ -29,11 +26,6 @@ def _put(root, source, rel, text):
 
 def build(root: Path) -> Path:
     root = Path(root)
-    # Arquivo: copy the synthetic example export unchanged.
-    shutil.copytree(ARQUIVO_EXAMPLE / "resources", root / "resources", dirs_exist_ok=True)
-    for name in ("documents",):
-        if (ARQUIVO_EXAMPLE / name).exists():
-            shutil.copytree(ARQUIVO_EXAMPLE / name, root / name, dirs_exist_ok=True)
     recs = {}
 
     def rec(source, **fields):

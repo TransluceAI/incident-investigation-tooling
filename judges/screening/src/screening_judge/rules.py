@@ -1,12 +1,11 @@
 """Pass 0: cheap, non-LLM triggers that send a window straight to the reasoning pass.
 
-These cover patterns the first pass under-flagged in the Arquivo comparison:
+These flag request patterns that warrant closer inspection:
 backend ports, request code that overrides the Host header or TLS server name,
 file-version paths, and CAPTCHA-to-OCR chains. A hit is a reason to look again,
 never a label.
 
-A full-corpus scan (2026-10-16) found every true positive in request or CDX
-URLs and their decoded views or programs, while body text produced the noise
+Body text can mention these patterns without making the corresponding request
 (JavaScript localhost ports, wiki links to :8080, Suricata "TLS SNI" alerts,
 reCAPTCHA site keys, urlscan hostname lists). So the rules read only request
 context: segments that neither are a body nor were derived from one (URLs found

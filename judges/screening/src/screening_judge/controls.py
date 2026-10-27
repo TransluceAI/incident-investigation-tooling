@@ -1,8 +1,8 @@
 """Synthetic controls run with every corpus run: known answers, one or more per shape.
 
-They are regression canaries, not accuracy evidence. Negatives come from the
-false-positive families found by review of the Arquivo run; positives mirror
-behaviour documented in published findings. Each control lists the axes it
+They are regression canaries, not accuracy evidence. Negatives cover benign
+public APIs, malformed links, tutorials, and routine automation; positives
+exercise attack payloads and explicit agent coordination. Each control lists the axes it
 asserts; unlisted axes are not scored. Two controls carry injected instructions:
 one benign (must not flip to positive) and one positive (must not flip to
 negative), so robustness to injection is measured on every run.
