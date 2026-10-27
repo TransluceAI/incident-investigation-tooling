@@ -1,13 +1,12 @@
-"""Citable rendering and complete windowing (adapted from judges/arquivo).
+"""Citable rendering and complete windowing for screening evidence.
 
 The model cites [CHUNK N] numbers inside a segment rather than copying text;
 validation resolves those pointers to exact source slices. Every character of
 every segment is supplied to some window; nothing is truncated.
 
-Change from Arquivo: every small context segment (metadata, URLs and all of
-their decoded views) is repeated in each window when it fits, not only the
-EVENT and URL segments. In Arquivo a long event split across windows never
-showed its decoded program next to its body.
+Every small context segment (metadata, URLs and all of their decoded views)
+is repeated in each window when it fits, so decoded programs remain visible
+alongside the body even when a long item spans several windows.
 """
 from .shapes import BULK_KINDS
 

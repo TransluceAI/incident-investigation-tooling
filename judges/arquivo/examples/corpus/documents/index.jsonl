@@ -1,2 +1,0 @@
-{"url": "https://shop.example/items?id=1%20UNION%20SELECT%20password%20FROM%20users--", "timestamp": "20260601000000", "status": "404", "mime": "text/html"}
-{"url": "https://stats.example/population.csv", "timestamp": "20260601000100", "status": "200", "mime": "text/csv"}

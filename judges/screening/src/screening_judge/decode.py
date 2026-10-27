@@ -2,9 +2,9 @@
 
 Nothing here executes, fetches or interprets content. Every view is text derived
 from the original URL so the model can read encoded material it would otherwise
-misjudge. The Arquivo review found 224 events whose base64 path segments or
-base64+zlib parameters were never decoded; inspected ones resolved to ordinary
-query parameters that the judge had read as possible injection payloads.
+misjudge. Base64 path segments and compressed parameters can encode ordinary
+queries as well as attack payloads; exposing their contents lets the judge
+assess the text instead of treating opaque encoding as evidence of injection.
 """
 import base64
 import re

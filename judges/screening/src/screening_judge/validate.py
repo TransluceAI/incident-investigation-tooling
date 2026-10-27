@@ -1,8 +1,8 @@
 """Validate one committed (window, axis) result against its prepared unit.
 
-Rules carried over from judges/arquivo: hash identity, schema validity, exact
+Checks enforce hash identity, schema validity, exact
 chunk resolution, and supported_success only for a response from a
-non-archive system. New rules enforce what the grammar does not: a yes needs at
+non-archive system. They also enforce what the grammar does not: a yes needs at
 least one resolved citation. V2 actions carry their own citations; saved v1
 schemas and their segment cross-references remain supported.
 """

@@ -68,7 +68,13 @@ class AdapterTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root=Path(tmp);data=build(root/'data');run=root/'run'
             p=data/'resources/arquivo.pt/records.jsonl'
-            rows=list(iter_jsonl(p));rows[0]['text_sha256']='0'*64;write_jsonl(p,rows)
+            # Keep this integrity check independent of any packaged example corpus.
+            (data/'documents').mkdir()
+            write_jsonl(data/'documents/index.jsonl', [
+                {'url': 'https://example.test/', 'timestamp': '20260601000000'}])
+            p.parent.mkdir(parents=True)
+            write_jsonl(p, [{'observation_id': 'index', 'kind': 'arquivo_index',
+                            'document_path': 'documents/index.jsonl', 'text_sha256': '0'*64}])
             summary=prepare(data,run,lambda chat:sum(len(m['content']) for m in chat)//3,6000,config(),with_controls=False)
             gaps=list(iter_jsonl(run/'gaps.jsonl'))
             self.assertEqual(sum(g['gap']=='document_hash_mismatch' and g['path']=='documents/index.jsonl' for g in gaps), 1)
