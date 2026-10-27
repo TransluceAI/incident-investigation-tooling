@@ -13,16 +13,24 @@ shared inference runner (inference/qwen/README.md#request-rows): finished messag
 axis schema and logprob options. engine.json is the runner profile for the run.
 """
 import contextlib
+import gc
 import json
+import multiprocessing
 import os
+import pickle
 import secrets
+import shutil
+import sys
+import traceback
+import warnings
 from collections import Counter
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
 from . import arquivo_ledger, benchmark, controls, records, shapes
-from .common import atomic_write_text, sha256_file, sha256_text, write_jsonl
+from .common import atomic_stream, atomic_write_text, sha256_file, sha256_text, write_jsonl
 from .prompts import load_prompts, messages, schemas
 from .render import render_citable, windows
 from .schemas import AXES, citation_schema
@@ -48,16 +56,24 @@ class Corpus:
         return text
 
 
+def published(path):
+    """Write path.tmp; publish it atomically only after a clean finish."""
+    return atomic_stream(path, "wb")
+
+
+def jsonl_line(row):
+    return (json.dumps(row, ensure_ascii=False) + "\n").encode("utf-8")
+
+
+def jsonl_writer(stream):
+    return lambda row: stream.write(jsonl_line(row))
+
+
 @contextlib.contextmanager
 def jsonl_stream(path):
     """Append rows to path.tmp; publish atomically only after a clean finish."""
-    path = Path(path)
-    tmp = path.with_name(path.name + ".tmp")
-    with open(tmp, "w", encoding="utf-8") as stream:
-        yield lambda row: stream.write(json.dumps(row, ensure_ascii=False) + "\n")
-        stream.flush()
-        os.fsync(stream.fileno())
-    os.replace(tmp, path)
+    with published(path) as stream:
+        yield jsonl_writer(stream)
 
 
 def _new_item(item_id, source, shape):
@@ -200,10 +216,36 @@ def item_bodies(item, corpus, gaps):
     return out
 
 
+def usable_cpus():
+    """CPUs this process may use: its affinity mask where the OS has one, capped by the job's Slurm allocation.
+
+    The cap matters where Slurm does not fence a job's cores (ConstrainCores=no), so the mask can cover the
+    whole node while the job was allocated fewer CPUs. SLURM_CPUS_ON_NODE is set in every job;
+    SLURM_CPUS_PER_TASK only when --cpus-per-task was given.
+    """
+    counts = [len(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity") else os.cpu_count()]
+    for name in ("SLURM_CPUS_PER_TASK", "SLURM_CPUS_ON_NODE"):
+        value = os.environ.get(name, "")
+        if value.isdigit() and int(value) > 0:
+            counts.append(int(value))
+    counts = [c for c in counts if c]
+    return min(counts) if counts else None
+
+
 def prepare(data_root, out, count, window_tokens, config_template, with_controls=True, shards=1,
-            benchmark_manifest=None, label_logprobs=10, citation_constraints=True):
+            benchmark_manifest=None, label_logprobs=10, citation_constraints=True, workers=1):
     if window_tokens <= 0 or type(shards) is not int or shards < 1:
         raise ValueError("window_tokens and shards must be positive")
+    if type(workers) is not int or workers < 1:
+        raise ValueError("workers must be a positive integer")
+    if workers > 1 and sys.version_info < (3, 12):
+        # Before 3.12 a fork-context ProcessPoolExecutor forks a worker on each submit() while its manager
+        # thread is already running, which can deadlock the child (python/cpython#90622).
+        raise ValueError("workers > 1 needs Python 3.12 or later")
+    cpus = usable_cpus()
+    if cpus and workers > cpus:
+        warnings.warn(f"workers={workers} exceeds the {cpus} CPUs this process may use; "
+                      "the extra workers share CPUs and add no speed", RuntimeWarning, stacklevel=2)
     if type(label_logprobs) is not int or not 0 <= label_logprobs <= 20:
         raise ValueError("label_logprobs must be an integer from 0 to 20")
     runner = runner_profile(config_template)
@@ -226,10 +268,15 @@ def prepare(data_root, out, count, window_tokens, config_template, with_controls
         write_jsonl(out / "gaps.jsonl", gaps)
         raise ValueError("No judgeable records found; refusing an empty corpus run")
     coverage, n_windows, heaviest = [], 0, {}
-    with jsonl_stream(out / "windows.jsonl") as put_window, jsonl_stream(out / "requests.jsonl") as put_request:
-        for item in items:
-            n_windows += _prepare_item(item, corpus, gaps, config, count, window_tokens,
-                                       put_window, put_request, coverage, heaviest=heaviest)
+    with published(out / "windows.jsonl") as window_stream, published(out / "requests.jsonl") as request_stream:
+        put_window, put_request = jsonl_writer(window_stream), jsonl_writer(request_stream)
+        if workers > 1:
+            n_windows += _prepare_parallel(items, corpus, gaps, config, count, window_tokens, coverage,
+                                           workers, out / ".parts", window_stream, request_stream)
+        else:
+            for item in items:
+                n_windows += _prepare_item(item, corpus, gaps, config, count, window_tokens,
+                                           put_window, put_request, coverage, heaviest=heaviest)
         if with_controls:
             for item, bodies, _, _ in controls.control_items():
                 items.append(item)
@@ -297,9 +344,150 @@ def write_shards(out, shards):
     return names, loads
 
 
+def _prepare_parallel(items, corpus, gaps, config, count, window_tokens, coverage, workers, parts,
+                      window_stream, request_stream):
+    """Prepare items in forked workers and append their output in item order.
+
+    Items are independent, so each task takes a contiguous range and writes its
+    own part files; joining the parts in range order reproduces the one-process
+    bytes. Many small ranges keep the workers evenly loaded and bound how many
+    finished parts wait on disk behind a slow one. Fork, not spawn, because count
+    (a tokenizer closure) need not be picklable.
+
+    Results are taken as they complete and merged once every earlier range has
+    been, so the first failure surfaces at once; the remaining workers are then
+    stopped rather than awaited. A worker killed outright (for example by the OOM
+    killer) raises BrokenProcessPool.
+
+    A task sends back only its window count, or None once it has written its
+    exception to a part file; everything else goes through part files too. A
+    message over 16 KiB is sent as two pipe writes, and a worker killed between
+    them leaves a partial message that blocks the executor's reader for good,
+    whereas a message under PIPE_BUF is written whole or not at all. An exception
+    is no exception: its message and traceback text are unbounded.
+    """
+    size = -(-len(items) // (workers * 16))
+    ranges = [(lo, min(lo + size, len(items))) for lo in range(0, len(items), size)]
+    parts.mkdir()
+    n_windows, finished, merged = 0, {}, 0
+    pool = ProcessPoolExecutor(min(workers, len(ranges)), mp_context=multiprocessing.get_context("fork"),
+                               initializer=_init_worker,
+                               initargs=((items, corpus.root, config, count, window_tokens, parts),))
+    try:
+        # Fork workers are launched by the first submit, not the constructor, so freezing here still precedes
+        # the fork; it keeps collections in the workers from copying every inherited page.
+        gc.freeze()
+        futures = {pool.submit(_prepare_range, bounds): idx for idx, bounds in enumerate(ranges)}
+        for future in as_completed(futures):
+            idx = futures[future]
+            finished[idx] = future.result()
+            if finished[idx] is None:
+                _raise_worker_error(parts, *ranges[idx])
+            while merged in finished:
+                (lo, hi), n = ranges[merged], finished.pop(merged)
+                meta = parts / f"{lo}.meta.pkl"
+                with open(meta, "rb") as src:
+                    item_shapes, hashes, part_coverage, part_gaps = pickle.load(src)
+                meta.unlink()
+                for item, shape in zip(items[lo:hi], item_shapes):
+                    item["shape"] = shape  # text items take their detected shape in _prepare_item
+                corpus.hashes.update(hashes)
+                coverage.extend(part_coverage)
+                gaps.extend(part_gaps)
+                n_windows += n
+                for name, stream in (("windows", window_stream), ("requests", request_stream)):
+                    part = parts / f"{lo}.{name}.jsonl"
+                    with open(part, "rb") as src:
+                        shutil.copyfileobj(src, stream, 1 << 24)
+                    part.unlink()
+                merged += 1
+        pool.shutdown()
+    except BaseException:
+        _stop_workers(pool)
+        raise
+    finally:
+        gc.unfreeze()
+        shutil.rmtree(parts, ignore_errors=True)
+    return n_windows
+
+
+def _stop_workers(pool):
+    """Stop running workers and wait until they have exited.
+
+    shutdown() alone waits for running tasks. Waiting on the executor after a kill
+    can deadlock on a half-sent result, so, like CPython 3.14's terminate_workers,
+    shut down without waiting; then join the processes so none still writes parts.
+    """
+    processes = list((pool._processes or {}).values())
+    pool.shutdown(wait=False, cancel_futures=True)
+    for process in processes:
+        process.terminate()
+    for process in processes:
+        process.join()
+
+
+_worker_state = None
+
+
+def _init_worker(state):
+    global _worker_state
+    _worker_state = (*state, {})  # the last entry is this process's heaviest-axis cache
+
+
+def _prepare_range(bounds):
+    """One worker task: prepare items[lo:hi] into part files, metadata included; return the window count.
+
+    On failure, write the exception to a part file and return None, so the pipe
+    carries a few bytes rather than the exception (see _prepare_parallel).
+    """
+    items, root, config, count, window_tokens, parts, heaviest = _worker_state
+    lo, hi = bounds
+    try:
+        corpus, gaps, coverage, n_windows = Corpus(root), [], [], 0
+        with open(parts / f"{lo}.windows.jsonl", "wb") as windows_out, \
+                open(parts / f"{lo}.requests.jsonl", "wb") as requests_out:
+            put_window, put_request = jsonl_writer(windows_out), jsonl_writer(requests_out)
+            for item in items[lo:hi]:
+                n_windows += _prepare_item(item, corpus, gaps, config, count, window_tokens,
+                                           put_window, put_request, coverage, heaviest=heaviest)
+        with open(parts / f"{lo}.meta.pkl", "wb") as meta:
+            pickle.dump(([item["shape"] for item in items[lo:hi]], corpus.hashes, coverage, gaps), meta)
+        return n_windows
+    except BaseException as exc:
+        with contextlib.suppress(BaseException), open(parts / f"{lo}.error.pkl", "wb") as out:
+            # The traceback text goes first so it survives an exception that fails to pickle or unpickle.
+            pickle.dump("".join(traceback.format_exception(exc)), out)
+            pickle.dump(exc, out)
+        return None
+
+
+class WorkerTraceback(Exception):
+    """A worker's traceback text, chained as the cause of the exception it raised."""
+
+    def __str__(self):
+        return "\n" + self.args[0]
+
+
+def _raise_worker_error(parts, lo, hi):
+    """Re-raise the exception the worker for items[lo:hi] wrote, its traceback chained as the cause."""
+    tb, exc = None, None
+    with contextlib.suppress(Exception), open(parts / f"{lo}.error.pkl", "rb") as src:
+        tb = pickle.load(src)
+        exc = pickle.load(src)
+    cause = WorkerTraceback(tb) if tb else None
+    if not isinstance(exc, BaseException):
+        exc = RuntimeError(f"Preparing items {lo}:{hi} failed in a worker"
+                           + ("" if tb else "; its exception could not be recorded"))
+    raise exc from cause
+
+
 def _prepare_item(item, corpus, gaps, config, count, window_tokens, put_window, put_request, coverage,
                   bodies=None, heaviest=None):
-    """Write one item's windows; return how many were written."""
+    """Write one item's windows; return how many were written.
+
+    _prepare_range returns this function's side effects to _prepare_parallel, which
+    merges them; a new side effect must be added to both.
+    """
     if item.get("integrity") == "excluded":
         bodies = None
     elif bodies is None:

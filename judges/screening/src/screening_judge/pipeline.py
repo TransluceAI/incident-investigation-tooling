@@ -46,6 +46,8 @@ def main():
                    help="Dry run without the tokenizer; the runner still enforces exact limits")
     a.add_argument("--no-controls", action="store_true")
     a.add_argument("--shards", type=int, default=1)
+    a.add_argument("--workers", type=int, default=1,
+                   help="Forked processes that build windows; the output is identical to one process")
     b = sub.add_parser("report", help="Validate outputs and write item results and review queues")
     b.add_argument("--run", required=True)
     b.add_argument("--outputs", nargs="+", required=True)
@@ -84,7 +86,7 @@ def main():
         summary = prepare(args.data_root, args.out, count, args.window_tokens, engine,
                           with_controls=not args.no_controls, shards=args.shards,
                           benchmark_manifest=args.benchmark_manifest, label_logprobs=args.label_logprobs,
-                          citation_constraints=not args.no_citation_constraints)
+                          citation_constraints=not args.no_citation_constraints, workers=args.workers)
         if args.estimate_tokens:
             summary["token_counts"] = f"estimated at {args.estimate_tokens} characters per token"
         print(json.dumps(summary, indent=2))
