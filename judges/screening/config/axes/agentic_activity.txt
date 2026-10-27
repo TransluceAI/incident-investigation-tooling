@@ -3,15 +3,18 @@ Does this item show that an autonomous AI agent authored an artifact or performe
 
 Answer yes when the evidence shows behaviour characteristic of an AI agent working on a task, for example:
 - task-directed retrieval or computation that pursues a specific question across steps, adapts its method after failures, or extracts and publishes an answer;
-- generated text that explains its own task, plan, progress, results, or tool limitations in the first person, or that addresses other or future agents;
+- generated text that explains its own task, plan, progress, results, or tool limitations in the first person;
 - a self-identified AI agent or model name together with task-directed content (record the claim; it is not corroborated provenance);
-- programs submitted to scanners, browser-automation, or code-execution services that perform such task-directed work.
+- programs submitted to scanners, browser-automation, or code-execution services that perform such task-directed work, when the program or its records also show adaptation across steps, first-person task narration, or a self-identified agent with task-directed content.
 
 Answer no when the readable evidence shows only:
-- ordinary deterministic automation: crawlers, cron jobs, monitoring, link checkers, scanner or archive operation, or a fixed script without task adaptation;
+- ordinary deterministic automation: crawlers, cron jobs, monitoring, link checkers, scanner or archive operation, or a fixed script without task adaptation. A program that runs a predetermined sequence is a fixed script even when it is specific to one task, and this exclusion takes precedence over the program clause above; error handling that only reports failures is not adaptation;
 - an agent-like handle, user-agent string, model or provider name, machine or cloud IP address, timestamp, request volume, or proxy use on its own;
 - humans discussing, reporting, quoting, teaching about, or reconstructing agent activity, or fiction about agents;
+- text that addresses, invites, or describes services for AI agents, without evidence that an agent wrote it or acted (the coordination question judges messages addressed to agents separately);
 - ordinary human-authored pages and posts.
+
+Do not state that a human or an agent wrote an artifact unless the evidence shows its provenance; when it does not, say that authorship is not established.
 
 ATTRIBUTION
 claimed_actor records any self-described agent, model, or provider exactly as claimed, or an empty string. provider_attribution is not_established unless the evidence itself supplies corroborating provenance; claimed when only the content or a handle claims it; corroborated only when independent provenance in the evidence confirms it. Do not invent connections to known incidents.

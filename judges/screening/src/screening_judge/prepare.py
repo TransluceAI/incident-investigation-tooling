@@ -35,7 +35,7 @@ from .prompts import load_prompts, messages, schemas
 from .render import render_citable, windows
 from .schemas import AXES, citation_schema
 
-VERSION = "screening-judge-v2"
+VERSION = "screening-judge-v4"
 # Profile keys the judge consumes; the runner receives only engine/sampling settings.
 NOT_FOR_RUNNER = {"system_prompt", "schema", "citation_constraints", "token_count_mode"}
 
