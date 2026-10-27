@@ -21,6 +21,7 @@ import pickle
 import secrets
 import shutil
 import sys
+import traceback
 import warnings
 from collections import Counter
 from concurrent.futures import ProcessPoolExecutor, as_completed
@@ -358,10 +359,12 @@ def _prepare_parallel(items, corpus, gaps, config, count, window_tokens, coverag
     stopped rather than awaited. A worker killed outright (for example by the OOM
     killer) raises BrokenProcessPool.
 
-    A task sends back only its window count; everything else goes through part
-    files. A result over 16 KiB is sent as two pipe writes, and a worker killed
-    between them leaves a partial message that blocks the executor's reader for
-    good, whereas a message under PIPE_BUF is written whole or not at all.
+    A task sends back only its window count, or None once it has written its
+    exception to a part file; everything else goes through part files too. A
+    message over 16 KiB is sent as two pipe writes, and a worker killed between
+    them leaves a partial message that blocks the executor's reader for good,
+    whereas a message under PIPE_BUF is written whole or not at all. An exception
+    is no exception: its message and traceback text are unbounded.
     """
     size = -(-len(items) // (workers * 16))
     ranges = [(lo, min(lo + size, len(items))) for lo in range(0, len(items), size)]
@@ -376,7 +379,10 @@ def _prepare_parallel(items, corpus, gaps, config, count, window_tokens, coverag
         gc.freeze()
         futures = {pool.submit(_prepare_range, bounds): idx for idx, bounds in enumerate(ranges)}
         for future in as_completed(futures):
-            finished[futures[future]] = future.result()
+            idx = futures[future]
+            finished[idx] = future.result()
+            if finished[idx] is None:
+                _raise_worker_error(parts, *ranges[idx])
             while merged in finished:
                 (lo, hi), n = ranges[merged], finished.pop(merged)
                 meta = parts / f"{lo}.meta.pkl"
@@ -429,19 +435,50 @@ def _init_worker(state):
 
 
 def _prepare_range(bounds):
-    """One worker task: prepare items[lo:hi] into part files, metadata included; return the window count."""
+    """One worker task: prepare items[lo:hi] into part files, metadata included; return the window count.
+
+    On failure, write the exception to a part file and return None, so the pipe
+    carries a few bytes rather than the exception (see _prepare_parallel).
+    """
     items, root, config, count, window_tokens, parts, heaviest = _worker_state
     lo, hi = bounds
-    corpus, gaps, coverage, n_windows = Corpus(root), [], [], 0
-    with open(parts / f"{lo}.windows.jsonl", "wb") as windows_out, \
-            open(parts / f"{lo}.requests.jsonl", "wb") as requests_out:
-        put_window, put_request = jsonl_writer(windows_out), jsonl_writer(requests_out)
-        for item in items[lo:hi]:
-            n_windows += _prepare_item(item, corpus, gaps, config, count, window_tokens,
-                                       put_window, put_request, coverage, heaviest=heaviest)
-    with open(parts / f"{lo}.meta.pkl", "wb") as meta:
-        pickle.dump(([item["shape"] for item in items[lo:hi]], corpus.hashes, coverage, gaps), meta)
-    return n_windows
+    try:
+        corpus, gaps, coverage, n_windows = Corpus(root), [], [], 0
+        with open(parts / f"{lo}.windows.jsonl", "wb") as windows_out, \
+                open(parts / f"{lo}.requests.jsonl", "wb") as requests_out:
+            put_window, put_request = jsonl_writer(windows_out), jsonl_writer(requests_out)
+            for item in items[lo:hi]:
+                n_windows += _prepare_item(item, corpus, gaps, config, count, window_tokens,
+                                           put_window, put_request, coverage, heaviest=heaviest)
+        with open(parts / f"{lo}.meta.pkl", "wb") as meta:
+            pickle.dump(([item["shape"] for item in items[lo:hi]], corpus.hashes, coverage, gaps), meta)
+        return n_windows
+    except BaseException as exc:
+        with contextlib.suppress(BaseException), open(parts / f"{lo}.error.pkl", "wb") as out:
+            # The traceback text goes first so it survives an exception that fails to pickle or unpickle.
+            pickle.dump("".join(traceback.format_exception(exc)), out)
+            pickle.dump(exc, out)
+        return None
+
+
+class WorkerTraceback(Exception):
+    """A worker's traceback text, chained as the cause of the exception it raised."""
+
+    def __str__(self):
+        return "\n" + self.args[0]
+
+
+def _raise_worker_error(parts, lo, hi):
+    """Re-raise the exception the worker for items[lo:hi] wrote, its traceback chained as the cause."""
+    tb, exc = None, None
+    with contextlib.suppress(Exception), open(parts / f"{lo}.error.pkl", "rb") as src:
+        tb = pickle.load(src)
+        exc = pickle.load(src)
+    cause = WorkerTraceback(tb) if tb else None
+    if not isinstance(exc, BaseException):
+        exc = RuntimeError(f"Preparing items {lo}:{hi} failed in a worker"
+                           + ("" if tb else "; its exception could not be recorded"))
+    raise exc from cause
 
 
 def _prepare_item(item, corpus, gaps, config, count, window_tokens, put_window, put_request, coverage,

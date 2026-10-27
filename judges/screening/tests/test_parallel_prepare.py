@@ -2,10 +2,12 @@ import json
 import os
 import pickle
 import signal
+import struct
 import tempfile
 import time
 import unittest
 from concurrent.futures.process import BrokenProcessPool
+from multiprocessing.connection import Connection
 from pathlib import Path
 from unittest import mock
 
@@ -16,6 +18,10 @@ from test_pipeline import config
 
 def count(chat):
     return sum(len(m['content']) for m in chat) // 3
+
+
+class UnpicklableError(Exception):
+    """An exception whose args (a lambda) cannot be pickled."""
 
 
 def measured_range(bounds):
@@ -146,6 +152,51 @@ class ParallelPrepareTests(unittest.TestCase):
         with self.assertRaises(BrokenProcessPool):
             prepare(self.data, self.root / 'killed', killed, 6000, config(), workers=3)
         self.assertFalse((self.root / 'killed/requests.jsonl').exists())
+
+    def test_a_worker_killed_while_sending_a_large_exception_fails_instead_of_hanging(self):
+        # A worker's exception, traceback text included, used to cross the result pipe like a result does;
+        # past 16 KiB that is two writes, and this kills the worker between them.
+        parent, send_bytes = os.getpid(), Connection._send_bytes
+        def killed_mid_send(conn, buf):
+            if os.getpid() != parent and len(buf) > 16384:
+                conn._send(struct.pack('!i', len(buf)))
+                os._exit(9)
+            send_bytes(conn, buf)
+        def failing(chat):
+            if 'ordinary text 11' in chat[-1]['content']:
+                raise RuntimeError('tokenizer failed: ' + 'x' * 40000)
+            return count(chat)
+        def hung(signum, frame):
+            raise AssertionError('preparation hung on a half-sent worker exception')
+        previous = signal.signal(signal.SIGALRM, hung)
+        self.addCleanup(signal.signal, signal.SIGALRM, previous)
+        self.addCleanup(signal.alarm, 0)
+        signal.alarm(20)
+        with mock.patch.object(Connection, '_send_bytes', killed_mid_send):
+            with self.assertRaisesRegex(RuntimeError, 'tokenizer failed: x{40000}'):
+                prepare(self.data, self.root / 'large', failing, 6000, config(), workers=3)
+        self.assertFalse((self.root / 'large/requests.jsonl').exists())
+        self.assertFalse((self.root / 'large/.parts').exists())
+
+    def test_a_worker_exception_keeps_its_type_and_worker_traceback(self):
+        def failing(chat):
+            if 'ordinary text 11' in chat[-1]['content']:
+                raise KeyError('missing token')
+            return count(chat)
+        with self.assertRaises(KeyError) as caught:
+            prepare(self.data, self.root / 'typed', failing, 6000, config(), workers=3)
+        self.assertEqual(caught.exception.args, ('missing token',))
+        self.assertIn("raise KeyError('missing token')", str(caught.exception.__cause__))
+
+    def test_an_unpicklable_worker_exception_is_reported_by_its_traceback(self):
+        def failing(chat):
+            if 'ordinary text 11' in chat[-1]['content']:
+                raise UnpicklableError('tokenizer failed', lambda: None)
+            return count(chat)
+        with self.assertRaisesRegex(RuntimeError, r'items \d+:\d+ failed in a worker') as caught:
+            prepare(self.data, self.root / 'unpicklable', failing, 6000, config(), workers=3)
+        self.assertIn('UnpicklableError', str(caught.exception.__cause__))
+        self.assertFalse((self.root / 'unpicklable/.parts').exists())
 
     def test_workers_must_be_a_positive_integer(self):
         for workers in (0, 1.5, True):
