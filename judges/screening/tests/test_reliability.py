@@ -10,6 +10,7 @@ from screening_judge.cascade import _pass1_rank
 import test_pipeline as tp
 from test_pipeline import result
 from screening_judge.common import iter_jsonl
+from screening_judge import records
 from screening_judge.records import import_location
 
 
@@ -45,6 +46,41 @@ class ReliabilityTests(unittest.TestCase):
                 self.assertFalse(validator.is_valid({**res,**changes}))
         res.update(attempt_present=False,actions=[],label='no')
         self.assertTrue(validator.is_valid(res))
+
+    def test_grammar_allows_supported_success_only_where_validation_does(self):
+        w, citation, action = self.setup_action()
+        stages = ('discussion_or_planning', 'published_payload', 'recorded_request',
+                  'observed_response', 'demonstrated_outcome')
+        systems = ('archive_replay', 'intermediary_service', 'ultimate_target', 'unknown')
+        for spec in (schema('hacking'), citation_schema('hacking', w['evidence_chunks'])):
+            validator = Draft202012Validator(spec)
+            for stage in stages:
+                for system in systems:
+                    for outcome in ('supported_success', 'unknown'):
+                        a = {**action, 'observed_stage': stage, 'responding_system': system, 'outcome': outcome}
+                        res = {**result('hacking', 'yes'), 'attempt_present': True, 'actions': [a]}
+                        try:
+                            validate({'status': 'success', 'result': res}, w, spec)
+                            accepted = True
+                        except ValidationError:
+                            accepted = False
+                        with self.subTest(stage=stage, system=system, outcome=outcome):
+                            # The grammar and the validator agree, so no decoded answer fails this rule.
+                            self.assertEqual(validator.is_valid(res), accepted)
+                            self.assertEqual(accepted, outcome != 'supported_success' or (
+                                stage in ('observed_response', 'demonstrated_outcome')
+                                and system in ('intermediary_service', 'ultimate_target')))
+
+    def test_budget_exhausted_answers_are_queued_for_review(self):
+        self.prepare([self.record()])
+        w = next(iter_jsonl(self.run/'windows.jsonl'))
+        rows = [{**tp.answered(self.run, f"{w['window_id']}:{axis}"), 'status': 'success',
+                 'result': result(axis), 'thinking_budget_exhausted': axis == 'hacking'}
+                for axis in ('hacking', 'agentic_activity', 'coordination')]
+        tp.write_worker(self.run, rows)
+        judgments = {j['axis']: j for j in tp.reconcile(self.run, [self.run/'outputs'])[2]}
+        self.assertIn('thinking_budget_exhausted_review', judgments['hacking']['review_warnings'])
+        self.assertNotIn('thinking_budget_exhausted_review', judgments['coordination']['review_warnings'])
 
     def test_no_citable_chunks_has_only_the_empty_action_branch(self):
         validator=Draft202012Validator(citation_schema('hacking',{}))
@@ -112,6 +148,30 @@ class ReliabilityTests(unittest.TestCase):
         evidence[0]['quote']+='\nGET /x HTTP/1.1'
         self.assertEqual(review_warnings({'actions':[a]},evidence),[])
 
+    def test_status_codes_absent_from_cited_text_are_flagged(self):
+        flag='status_not_in_cited_text_review'
+        evidence=[{'segment_id':'S2','chunk_id':1,'quote':'GET /admin HTTP/1.1\n40'},
+                  {'segment_id':'S2','chunk_id':2,'quote':'3 Forbidden'}]
+        res={**result('hacking'),'rationale':'The probe of /admin returned a 401.'}
+        self.assertIn(flag,review_warnings(res,evidence))
+        res['rationale']='The probe of /admin returned 403 Forbidden.'  # split across adjacent chunks
+        self.assertEqual(review_warnings(res,evidence),[])
+        res['actions']=[{'target':'admin panel','action':'retry ended in a 500 error'}]
+        self.assertIn(flag,review_warnings(res,evidence))
+        res['actions']=[{'target':'admin panel','action':'beacon to pie.dev/status/204 in 1200-char chunks'}]
+        self.assertEqual(review_warnings(res,evidence),[])  # URL paths and counts are not status claims
+        res['rationale']='The API answered with 403 PermissionDeniedException.'
+        evidence[:]=[{'segment_id':'S2','chunk_id':1,'quote':'request id 14031'}]
+        self.assertIn(flag,review_warnings(res,evidence))
+        res['rationale']='The probe of /admin returned 403 Forbidden.'
+        for quotes,flagged in [((('S2',1,'count=40'),('S2',3,'3 requests')),True),  # not adjacent
+                               ((('S2',1,'count=40'),('S3',2,'3 requests')),True),  # other segment
+                               ((('S2',1,'HTTP 403'),('S2',3,'2 requests')),False),
+                               ((('S2',2,'3 Forbidden'),('S2',1,'HTTP 40')),False)]:  # cited out of order
+            evidence[:]=[{'segment_id':s,'chunk_id':c,'quote':q} for s,c,q in quotes]
+            self.assertEqual(flag in review_warnings(res,evidence),flagged,quotes)
+        self.assertEqual(review_warnings(res,[]),[])  # nothing cited, nothing to compare
+
     def texts(self, kind):
         w = next(iter_jsonl(self.run/'windows.jsonl'))
         return [''.join(w['text'][c['text_start']:c['text_end']] for c in w['evidence_chunks'][sid])
@@ -146,10 +206,39 @@ class ReliabilityTests(unittest.TestCase):
         self.assertEqual(sorted(u for i in items for u in i['request_urls']), sorted(targets))
 
     def test_redaction_rewrites_only_the_source_url_field(self):
-        self.prepare([self.record(collection_method='imported', source_url='data', note='metadata dump')])
+        self.prepare([self.record(collection_method='imported', source_url='data', title='metadata dump')])
         provenance = self.texts('PROVENANCE')[0]
-        self.assertIn('note=metadata dump', provenance)
+        self.assertIn('title=metadata dump', provenance)
         self.assertIn('source_url=[import location; kept in audit record]', provenance)
+
+    def test_prompt_provenance_keeps_activity_fields_and_omits_curator_notes(self):
+        meta = {'original_url': 'https://site.example/p', 'http_status': 403, 'comment': 'reverted edit',
+                'selection_basis': 'task_or_exchange_signal', 'not_an_agent_verdict': True,
+                'origin': {'kind': 'paste_candidate', 'response_quality': 'high'}}
+        summary = self.prepare([self.record(collection_run='agent-sources-20260930', scope='source_time_in_window',
+                                            source_time='2026-09-01', original_record={'metadata': meta})])
+        provenance = self.texts('PROVENANCE')[0]
+        for kept in ('kind=raw_paste', 'source_time=2026-09-01', 'metadata.original_url=https://site.example/p',
+                     'metadata.http_status=403', 'metadata.comment=reverted edit'):
+            self.assertIn(kept, provenance)
+        for hidden in ('agent-sources', 'source_time_in_window', 'task_or_exchange_signal',
+                       'not_an_agent_verdict', 'paste_candidate', 'response_quality'):
+            self.assertNotIn(hidden, provenance)
+        self.assertIn('[collection fields omitted: 6; kept in audit record]', provenance)
+        line = next(iter_jsonl(self.run/'items.jsonl'))['observations'][0]['line']
+        self.assertIn('metadata.selection_basis=task_or_exchange_signal', line)
+        self.assertIn('collection_run=agent-sources-20260930', line)
+        self.assertEqual(summary['prompt_omitted_fields'], {'sample': {
+            'collection_run': 1, 'metadata.not_an_agent_verdict': 1, 'metadata.origin': 1,
+            'metadata.selection_basis': 1, 'observation_id': 1, 'scope': 1}})
+
+    def test_provenance_keys_qualify_by_their_last_word(self):
+        for key in ('request_url', 'requestUrl', 'href', 'redirect_target', 'fetched_at', 'createdAt',
+                    'capture_date', 'timestamp', 'source_time', 'linked_urls'):
+            self.assertTrue(records._describes_activity(key), key)
+        for key in ('candidate_reason', 'url_selection_reason', 'update_note', 'format', 'runtime',
+                    'curl_command', 'timeline_verdict', 'target_rationale'):
+            self.assertFalse(records._describes_activity(key), key)
 
     def test_source_site_match_ignores_case(self):
         rec = {'collection_method': 'imported', 'source_url': 'https://www.example.com/page'}

@@ -48,9 +48,10 @@ CONTROLS = [
      "Editorial note: journalists reported last month that AI agents coordinated answers on several "
      "public wikis. This page summarises that reporting and links to the articles.",
      {"agentic_activity": False, "coordination": False}, False),
+    # Addressing agents under an agent-like handle is coordination, not evidence that an agent acted.
     ("agent-go-signal", "message", [],
      "[scout-1] round 3 go: all agents post final values to this topic, then stop. Tally so far: 4/8.",
-     {"agentic_activity": True, "coordination": True}, False),
+     {"agentic_activity": False, "coordination": True}, False),
     ("cron-message", "message", [],
      "nightly backup finished 02:00 UTC, 0 errors, 14 files", {"agentic_activity": False,
                                                                "coordination": False, "hacking": False}, False),

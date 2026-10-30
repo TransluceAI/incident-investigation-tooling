@@ -58,12 +58,13 @@ def _url_views(segs, item_id, url, label):
 
 
 def _prompt_provenance(obs):
-    """Hide only the source_url field holding an import location; items.jsonl keeps it."""
+    """Activity fields only, with any import location hidden; items.jsonl keeps the full line."""
+    line = obs.get("prompt_line", obs["line"])
     location = obs.get("import_location")
     if not location:
-        return obs["line"]
+        return line
     field = re.compile(r"(?<![\w.])((?:\w+\.)*source_url)=" + re.escape(location) + r"(?= \| |$)")
-    return field.sub(r"\1=[import location; kept in audit record]", obs["line"])
+    return field.sub(r"\1=[import location; kept in audit record]", line)
 
 
 def build_segments(item: dict, bodies: list) -> list:

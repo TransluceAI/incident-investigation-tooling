@@ -23,8 +23,11 @@ URL_KEYS = ("original_url", "url", "request_url", "target_url", "source_url", "d
             "destination_url", "long_url", "page_url", "href")
 TIME_KEYS = ("capture_timestamp", "timestamp", "capture_time", "published_at", "created_at",
              "revision_time", "source_time", "date", "observed_at", "retrieved_at")
-URLISH = re.compile(r"(url|uri|href|destination|target|link)", re.I)
-TIMEISH = re.compile(r"(time|date|_at$|timestamp)", re.I)
+# A key names a URL or time only when its last word does: request_url, fetched_at,
+# createdAt. A substring is not enough (candidate_reason, url_selection_reason).
+_LAST_WORD = r"(?:^|[_.-]|(?<=[a-z0-9])(?=[A-Z]))"
+URLISH = re.compile(_LAST_WORD + r"(?i:url|uri|href|destination|target|link)s?$")
+TIMEISH = re.compile(_LAST_WORD + r"(?i:time|date|datetime|timestamp|at)s?$")
 
 
 def sources(root: Path):
@@ -105,15 +108,55 @@ def observed_time(rec):
     return _pick(rec, TIME_KEYS, TIMEISH, False)
 
 
-def provenance_line(rec) -> str:
-    """One compact, complete line of scalar provenance for an observation."""
-    skip = {"document_path", "raw_path", "text_sha256"}
-    parts = [f"{k}={v}" for k, v in _scalars({k: v for k, v in rec.items()
-                                               if k not in skip and k != "original_record"})]
+def _provenance_fields(rec) -> dict:
+    skip = {"document_path", "raw_path", "text_sha256", "original_record"}
+    fields = {k: v for k, v in rec.items() if k not in skip}
     meta = rec.get("original_record", {}).get("metadata") if isinstance(rec.get("original_record"), dict) else None
     if isinstance(meta, dict) and "metadata" not in rec:
-        parts += [f"metadata.{k}={v}" for k, v in _scalars(meta)]
-    return " | ".join(str(p) for p in parts)
+        fields["metadata"] = meta
+    return fields
+
+
+def _line(fields) -> str:
+    return " | ".join(f"{k}={v}" for k, v in _scalars(fields))
+
+
+def provenance_line(rec) -> str:
+    """One compact, complete line of scalar provenance for an observation."""
+    return _line(_provenance_fields(rec))
+
+
+# Fields that describe the observed activity. Everything else a collector wrote
+# (selection reasons, run names, window checks, verdict-like notes) can steer the
+# judge without being evidence, so prompts omit it and the audit line keeps it.
+ACTIVITY_FIELDS = frozenset({
+    "kind", "source", "site", "wiki", "collection_method", "time_basis",
+    "title", "page", "comment", "summary", "revision", "revision_id", "parent_id",
+    "user", "username", "author", "editor", "actor", "ip", "method", "user_agent", "referrer",
+    "status", "status_code", "http_status", "original_status", "original_location",
+    "mime", "content_type", "representation", "body_withheld", "credentials_redacted",
+    "request", "requests", "response", "responses", "headers", "payload", "params", "query", "body", "cookies"})
+
+
+def _describes_activity(key) -> bool:
+    return key in ACTIVITY_FIELDS or bool(URLISH.search(key) or TIMEISH.search(key))
+
+
+def prompt_provenance(rec):
+    """The provenance line shown to the model (activity fields only) and the omitted field names."""
+    kept, omitted = {}, []
+    for k, v in _provenance_fields(rec).items():
+        if k == "metadata" and isinstance(v, dict):
+            kept[k] = {mk: mv for mk, mv in v.items() if _describes_activity(mk)}
+            omitted += [f"metadata.{mk}" for mk in v if mk not in kept[k]]
+        elif _describes_activity(k):
+            kept[k] = v
+        else:
+            omitted.append(k)
+    line = _line(kept)
+    if omitted:
+        line += f"{' | ' if line else ''}[collection fields omitted: {len(omitted)}; kept in audit record]"
+    return line, omitted
 
 
 def item_key(source, shape, rec):
