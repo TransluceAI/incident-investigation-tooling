@@ -10,6 +10,7 @@ from screening_judge.cascade import _pass1_rank
 import test_pipeline as tp
 from test_pipeline import result
 from screening_judge.common import iter_jsonl
+from screening_judge import records
 from screening_judge.records import import_location
 
 
@@ -223,6 +224,14 @@ class ReliabilityTests(unittest.TestCase):
         self.assertEqual(summary['prompt_omitted_fields'], {'sample': {
             'collection_run': 1, 'metadata.not_an_agent_verdict': 1, 'metadata.origin': 1,
             'metadata.selection_basis': 1, 'observation_id': 1, 'scope': 1}})
+
+    def test_provenance_keys_qualify_by_their_last_word(self):
+        for key in ('request_url', 'requestUrl', 'href', 'redirect_target', 'fetched_at', 'createdAt',
+                    'capture_date', 'timestamp', 'source_time', 'linked_urls'):
+            self.assertTrue(records._describes_activity(key), key)
+        for key in ('candidate_reason', 'url_selection_reason', 'update_note', 'format', 'runtime',
+                    'curl_command', 'timeline_verdict', 'target_rationale'):
+            self.assertFalse(records._describes_activity(key), key)
 
     def test_source_site_match_ignores_case(self):
         rec = {'collection_method': 'imported', 'source_url': 'https://www.example.com/page'}
