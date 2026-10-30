@@ -136,6 +136,23 @@ class SubmissionTests(unittest.TestCase):
         self.assertFalse((self.run / '.submission-pending').exists())
         self.invoke('--resume')  # resubmission needs no manual cleanup
 
+    def test_fresh_submission_accepts_a_preflight_into_the_run_outputs(self):
+        worker = self.run / 'outputs/worker-0'
+        worker.mkdir(parents=True)
+        (worker / 'validated.json').write_text('{}\n')
+        (worker / '.writer.lock').touch()
+        self.fresh()
+        self.assertEqual((worker / 'validated.json').read_text(), '{}\n')
+        for stray in ('outputs/worker-0/part-0.jsonl', 'outputs/notes.txt', 'notes.txt'):
+            with self.subTest(stray=stray):
+                run = self.root / stray.replace('/', '-')
+                (run / 'outputs/worker-0').mkdir(parents=True)
+                (run / 'outputs/worker-0/validated.json').write_text('{}\n')
+                (run / stray).write_text('x\n')
+                with self.assertRaises(SystemExit):
+                    self.fresh(run_dir=run)
+                self.assertIn('Choose a fresh run directory', self.errors.getvalue())
+
     def test_resume_reports_missing_saved_files(self):
         self.fresh()
         for name in ('inputs.txt', 'hashes.json', 'config.json', 'inference_runner.py', 'run.sbatch', 'python.txt'):
