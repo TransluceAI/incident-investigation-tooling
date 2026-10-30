@@ -46,6 +46,30 @@ class ReliabilityTests(unittest.TestCase):
         res.update(attempt_present=False,actions=[],label='no')
         self.assertTrue(validator.is_valid(res))
 
+    def test_grammar_allows_supported_success_only_where_validation_does(self):
+        w, citation, action = self.setup_action()
+        stages = ('discussion_or_planning', 'published_payload', 'recorded_request',
+                  'observed_response', 'demonstrated_outcome')
+        systems = ('archive_replay', 'intermediary_service', 'ultimate_target', 'unknown')
+        for spec in (schema('hacking'), citation_schema('hacking', w['evidence_chunks'])):
+            validator = Draft202012Validator(spec)
+            for stage in stages:
+                for system in systems:
+                    for outcome in ('supported_success', 'unknown'):
+                        a = {**action, 'observed_stage': stage, 'responding_system': system, 'outcome': outcome}
+                        res = {**result('hacking', 'yes'), 'attempt_present': True, 'actions': [a]}
+                        try:
+                            validate({'status': 'success', 'result': res}, w, spec)
+                            accepted = True
+                        except ValidationError:
+                            accepted = False
+                        with self.subTest(stage=stage, system=system, outcome=outcome):
+                            # The grammar and the validator agree, so no decoded answer fails this rule.
+                            self.assertEqual(validator.is_valid(res), accepted)
+                            self.assertEqual(accepted, outcome != 'supported_success' or (
+                                stage in ('observed_response', 'demonstrated_outcome')
+                                and system in ('intermediary_service', 'ultimate_target')))
+
     def test_no_citable_chunks_has_only_the_empty_action_branch(self):
         validator=Draft202012Validator(citation_schema('hacking',{}))
         res=result('hacking','insufficient_evidence')

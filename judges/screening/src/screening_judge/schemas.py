@@ -9,6 +9,8 @@ Every axis splits on evidence: an empty evidence list allows only no or
 insufficient_evidence. Hacking also uses disjoint anyOf branches:
 attempt_present=false forces actions=[], while true requires at least one
 action, each with its own citations; the reporter builds their resolved union.
+An action's outcome follows its stage and responding system, so
+supported_success is reachable only from a stage and system that can show it.
 citation_schema additionally narrows all pointers to the supplied window.
 Exercise these schemas on the deployed grammar backend whenever their structure
 changes.
@@ -37,6 +39,9 @@ STAGES = ("discussion_or_planning", "published_payload", "recorded_request",
           "observed_response", "demonstrated_outcome")
 RESPONDERS = ("archive_replay", "intermediary_service", "ultimate_target", "unknown")
 OUTCOMES = ("supported_success", "blocked_or_failed", "unknown", "not_applicable")
+# Only these stages and responding systems can establish supported_success.
+SUCCESS_STAGES = ("observed_response", "demonstrated_outcome")
+SUCCESS_RESPONDERS = ("intermediary_service", "ultimate_target")
 MECHANISMS = ("shared_results", "relayed_message", "shared_state", "addressed_to_agents",
               "other", "none")
 
@@ -100,6 +105,18 @@ def _evidence_branches(base):
     return [empty, cited]
 
 
+def _action_branches(action):
+    """Disjoint by stage and system, which precede outcome in generation order."""
+    other = [o for o in OUTCOMES if o != "supported_success"]
+    cases = [([s for s in STAGES if s not in SUCCESS_STAGES], list(RESPONDERS), other),
+             (list(SUCCESS_STAGES), [r for r in RESPONDERS if r not in SUCCESS_RESPONDERS], other),
+             (list(SUCCESS_STAGES), list(SUCCESS_RESPONDERS), list(OUTCOMES))]
+    return {"anyOf": [{**action, "properties": {**action["properties"], "observed_stage": {"enum": stages},
+                                                "responding_system": {"enum": responders},
+                                                "outcome": {"enum": outcomes}}}
+                      for stages, responders, outcomes in cases]}
+
+
 def _gate(base):
     """Disjoint complete branches work with JSON Schema and xgrammar alike."""
     branches = []
@@ -108,6 +125,8 @@ def _gate(base):
         props = branch["properties"]
         props["attempt_present"] = {"type": "boolean", "enum": [present]}
         props["actions"]["minItems" if present else "maxItems"] = 1 if present else 0
+        if present:
+            props["actions"]["items"] = _action_branches(props["actions"]["items"])
         # A real attempt already requires action-local citations. Without an
         # action, positive answers must cite top-level evidence instead.
         branches.extend([branch] if present else _evidence_branches(branch))
