@@ -25,7 +25,11 @@ def _status_not_cited(result, evidence):
     claims = [result.get(k) for k in ("rationale", "boundary", "authorization")]
     claims += [a.get(k) for a in (actions if isinstance(actions, list) else []) if isinstance(a, dict)
                for k in ("target", "action")]
-    cited = "".join(e["quote"] for e in evidence)  # adjacent chunks can split a token
+    # Consecutive chunks of one segment can split a token; any other pair stays apart.
+    cited, prev = "", None
+    for e in sorted(evidence, key=lambda e: (e["segment_id"], e["chunk_id"])):
+        cited += ("" if prev == (e["segment_id"], e["chunk_id"] - 1) else "\n") + e["quote"]
+        prev = (e["segment_id"], e["chunk_id"])
     return any(not re.search(rf"(?<!\d){code}(?!\d)", cited)
                for claim in claims if isinstance(claim, str)
                for m in STATUS_CLAIM.finditer(claim) for code in m.groups() if code)

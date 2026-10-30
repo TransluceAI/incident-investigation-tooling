@@ -163,6 +163,13 @@ class ReliabilityTests(unittest.TestCase):
         res['rationale']='The API answered with 403 PermissionDeniedException.'
         evidence[:]=[{'segment_id':'S2','chunk_id':1,'quote':'request id 14031'}]
         self.assertIn(flag,review_warnings(res,evidence))
+        res['rationale']='The probe of /admin returned 403 Forbidden.'
+        for quotes,flagged in [((('S2',1,'count=40'),('S2',3,'3 requests')),True),  # not adjacent
+                               ((('S2',1,'count=40'),('S3',2,'3 requests')),True),  # other segment
+                               ((('S2',1,'HTTP 403'),('S2',3,'2 requests')),False),
+                               ((('S2',2,'3 Forbidden'),('S2',1,'HTTP 40')),False)]:  # cited out of order
+            evidence[:]=[{'segment_id':s,'chunk_id':c,'quote':q} for s,c,q in quotes]
+            self.assertEqual(flag in review_warnings(res,evidence),flagged,quotes)
         self.assertEqual(review_warnings(res,[]),[])  # nothing cited, nothing to compare
 
     def texts(self, kind):
