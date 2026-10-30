@@ -592,12 +592,16 @@ def run(resources):
             for row, _, _ in batch:
                 validator_for(row)
     validation_seconds = time.monotonic() - validation_started
-    if args.validate_only:
-        print(json.dumps({'event': 'validated', 'units': len(input_info), 'identity': identity}), flush=True)
-        return
     lock = resources.enter_context(open(directory / '.writer.lock', 'a'))
     fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
     identity_path = directory / 'identity.json'
+    if args.validate_only:
+        # A preflight into the run's own output directory spares its workers a second pass.
+        # A directory holding another run keeps its record.
+        if not identity_path.exists() or json.loads(identity_path.read_text())['identity'] == identity:
+            write_json(validation_path, validation)
+        print(json.dumps({'event': 'validated', 'units': len(input_info), 'identity': identity}), flush=True)
+        return
     if identity_path.exists():
         if not args.resume or json.loads(identity_path.read_text())['identity'] != identity:
             raise ValueError('Existing output requires --resume with matching identity')

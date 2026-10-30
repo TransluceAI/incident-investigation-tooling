@@ -347,11 +347,12 @@ class ReasoningTests(unittest.TestCase):
             with patch.object(sys, 'argv', argv+['--validate-only']):
                 r.main()
             self.assertEqual(len(templated), 2)
-            self.assertFalse(record.exists())  # an explicit check writes no record
+            self.assertTrue(record.exists())  # a preflight records its pass for this directory
+            self.assertFalse((root/'outputs/worker-0/identity.json').exists())
             templated.clear()
             with patch.object(sys, 'argv', argv):
                 r.main()
-            self.assertEqual(len(templated), 4)  # first run: the full pass, then generation
+            self.assertEqual(len(templated), 2)  # first run reuses the preflight: generation only
             matching = record.read_text()
             resume(0, 'everything committed and already validated')
             with patch.object(sys, 'argv', argv+['--validate-only']):

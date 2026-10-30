@@ -244,7 +244,9 @@ passes, `outputs/worker-*/validated.json` records the run identity and digests o
 the Python version, the installed packages and the tokenizer as loaded (class,
 options, vocabulary and chat template), and a resume with the same record skips
 that pass. A missing, unreadable or mismatched record means a full pass;
-`--validate-only` always validates and writes no record. Changed model, config, code,
+`--validate-only` always validates and records its pass in the worker directory
+unless that directory holds another run, so point a preflight's `--output-dir` at
+the run's `outputs` directory to spare the workers a second pass. Changed model, config, code,
 or input requires a new run directory. The launcher records the Python path,
 not a hash of the full runtime/model contents; those must not be modified in place.
 Directory aliases are resolved at submission so switching a release symlink does
