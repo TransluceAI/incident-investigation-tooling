@@ -487,6 +487,22 @@ class DecodingControlTests(unittest.TestCase):
         answer = SimpleNamespace(token_ids=tokenizer.encode('x' * 50), text='', finish_reason='length')
         self.assertFalse(r.budget_exhausted(answer, r.split_answer(answer, tokenizer, True), budget, end_ids, 1))
 
+    def test_budget_exhaustion_counts_open_reasoning_in_the_prompt(self):
+        # vLLM charges prompt tokens after an unclosed <think> to the budget,
+        # so the forced close comes that many generated tokens earlier.
+        tokenizer, budget = EndTokenizer(), 5
+        end_ids = tokenizer.encode('Answer now.\n</think>')
+
+        def exhausted(ids, prompt):
+            answer = SimpleNamespace(token_ids=ids + tokenizer.encode('{}'), text='', finish_reason='stop')
+            return r.budget_exhausted(answer, r.split_answer(answer, tokenizer, True), budget, end_ids, 1, prompt)
+
+        forced = tokenizer.encode('x' * (budget - 1) + 'Answer now.\n') + [2]
+        self.assertTrue(exhausted(forced, [20, 1, 21]))  # opener and one charged token
+        self.assertFalse(exhausted(forced, [20]))  # no open reasoning in the prompt
+        self.assertFalse(exhausted(forced, [1, 21, 2, 20]))  # prompt reasoning already closed
+        self.assertFalse(exhausted(tokenizer.encode('x' * (budget - 2) + 'Answer now.\n') + [2], [20, 1, 21]))
+
     def test_controls_example_config_is_valid(self):
         path = Path(__file__).resolve().parents[1] / 'config/qwen3.8-27b-fp8.thinking.controls.json'
         cfg = json.loads(path.read_text())

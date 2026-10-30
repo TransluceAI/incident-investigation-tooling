@@ -388,19 +388,25 @@ def validate_answer(answer, prompt_ids, expected_tokens, tokenizer, validator, e
     return parsed, None, fields
 
 
-def budget_exhausted(answer, fields, budget, end_ids, start):
+def budget_exhausted(answer, fields, budget, end_ids, start, prompt_ids=()):
     """True when vLLM forced the closing string after a full reasoning budget.
 
     reasoning_tokens counts the closing </think> (and a generated opener), so a
-    natural stop on the last budgeted token is not a cap. A bare '</think>' end
-    string cannot be told apart from such a natural stop.
+    natural stop on the last budgeted token is not a cap. vLLM also charges the
+    budget for prompt tokens after an unclosed <think> (Qwen's template ends in
+    '<think>\\n'), so fewer tokens are generated before the forced close. A bare
+    '</think>' end string cannot be told apart from such a natural stop.
     """
     n = fields['reasoning_tokens']
     if not fields['reasoning_complete'] or not n:
         return False
     ids = list(answer.token_ids)[:n]
     opener = 1 if ids[0] == start else 0
-    return ids[-len(end_ids):] == end_ids and n - opener - len(end_ids) >= budget
+    prompt = list(prompt_ids)
+    opened = max((i for i, t in enumerate(prompt) if t == start), default=-1)
+    closed = max((i for i, t in enumerate(prompt) if t == end_ids[-1]), default=-1)
+    charged = len(prompt) - opened - 1 if opened > closed else 0
+    return ids[-len(end_ids):] == end_ids and n - opener - len(end_ids) >= budget - charged
 
 
 def batches(rows, tokenizer, config, skip):
@@ -747,7 +753,8 @@ def run(resources):
                         result['logprobs'] = logprobs
                     if controls['budget'] is not None:
                         result['thinking_budget_exhausted'] = budget_exhausted(
-                            answer, answer_fields, controls['budget'], end_ids, start_id)
+                            answer, answer_fields, controls['budget'], end_ids, start_id,
+                            output.prompt_token_ids)
                     if 'body' in row:
                         # Every attempt, the committed one last.
                         result['attempts'] = list(history.get(i, ())) + [{
