@@ -70,6 +70,17 @@ class ReliabilityTests(unittest.TestCase):
                                 stage in ('observed_response', 'demonstrated_outcome')
                                 and system in ('intermediary_service', 'ultimate_target')))
 
+    def test_budget_exhausted_answers_are_queued_for_review(self):
+        self.prepare([self.record()])
+        w = next(iter_jsonl(self.run/'windows.jsonl'))
+        rows = [{**tp.answered(self.run, f"{w['window_id']}:{axis}"), 'status': 'success',
+                 'result': result(axis), 'thinking_budget_exhausted': axis == 'hacking'}
+                for axis in ('hacking', 'agentic_activity', 'coordination')]
+        tp.write_worker(self.run, rows)
+        judgments = {j['axis']: j for j in tp.reconcile(self.run, [self.run/'outputs'])[2]}
+        self.assertIn('thinking_budget_exhausted_review', judgments['hacking']['review_warnings'])
+        self.assertNotIn('thinking_budget_exhausted_review', judgments['coordination']['review_warnings'])
+
     def test_no_citable_chunks_has_only_the_empty_action_branch(self):
         validator=Draft202012Validator(citation_schema('hacking',{}))
         res=result('hacking','insufficient_evidence')
