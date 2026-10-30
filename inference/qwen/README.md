@@ -75,13 +75,15 @@ For multiple workers, split it into nonempty, disjoint shards named `part-0.json
 `system_prompt` and `schema`; request rows carry their own messages and optional
 schema. The bundled examples extract synthetic marker values.
 
-Preflight uses the real tokenizer without loading GPU weights:
+Preflight uses the real tokenizer without loading GPU weights. Pointed at the
+run's `outputs` (worker N for shard N), it records its pass so the workers skip
+theirs, and `submit.py` still accepts the run as fresh:
 
 ```bash
 .runtime/venv/bin/python scripts/inference_runner.py \
   --config .runtime/config/qwen3.8-27b-fp8.json \
   --input-manifest examples/input.jsonl \
-  --output-dir runs/preflight --worker-id 0 --validate-only
+  --output-dir "$PWD/runs/smoke-v1/outputs" --worker-id 0 --validate-only
 
 .runtime/venv/bin/python scripts/submit.py \
   --manifest examples/input.jsonl --run-dir "$PWD/runs/smoke-v1" \

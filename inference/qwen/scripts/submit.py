@@ -28,6 +28,14 @@ def sha(path):
         return hashlib.file_digest(source, 'sha256').hexdigest()
 
 
+def preflight_only(run):
+    """True when the run holds only what `--validate-only` writes into its outputs."""
+    workers = list((run/'outputs').iterdir()) if (run/'outputs').is_dir() else []
+    return ([path.name for path in run.iterdir()] == ['outputs'] and
+            all(w.is_dir() and re.fullmatch(r'worker-\d+', w.name) and
+                {f.name for f in w.iterdir()} <= {'validated.json', '.writer.lock'} for w in workers))
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     source = p.add_mutually_exclusive_group()
@@ -79,7 +87,7 @@ def main():
                 p.error(f'Incomplete run directory: missing {name}')
         paths = [Path(line) for line in (run/'inputs.txt').read_text().splitlines()]
     else:
-        if run.exists() and any(run.iterdir()):
+        if run.exists() and any(run.iterdir()) and not preflight_only(run):
             p.error('Choose a fresh run directory or use --resume')
         if args.manifest:
             paths = [args.manifest.resolve(strict=True)]

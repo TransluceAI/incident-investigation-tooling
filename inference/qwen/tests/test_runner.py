@@ -15,6 +15,10 @@ if not runner_path.exists():
 spec = importlib.util.spec_from_file_location('inference_runner', runner_path)
 r = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(r)
+submit_spec = importlib.util.spec_from_file_location(
+    'submit', Path(__file__).resolve().parents[1] / 'scripts/submit.py')
+submit = importlib.util.module_from_spec(submit_spec)
+submit_spec.loader.exec_module(submit)
 
 
 class FakeTokenizer:
@@ -331,9 +335,10 @@ class ReasoningTests(unittest.TestCase):
             cfg.write_text(json.dumps({**self.cfg, 'model': 'Org/model'}))
             manifest.write_text(''.join(json.dumps({'unit_id': str(i), 'chunk_idx': 0,
                 'text': 'evidence', 'text_sha256': r.digest(b'evidence')})+'\n' for i in range(2)))
+            run = root/'run'  # a submit.py run directory
             argv = ['runner', '--config', str(cfg), '--input-manifest', str(manifest),
-                    '--output-dir', str(root/'outputs'), '--worker-id', '0']
-            record = root/'outputs/worker-0/validated.json'
+                    '--output-dir', str(run/'outputs'), '--worker-id', '0']
+            record = run/'outputs/worker-0/validated.json'
 
             def resume(expected, why):
                 templated.clear()
@@ -348,7 +353,7 @@ class ReasoningTests(unittest.TestCase):
                 r.main()
             self.assertEqual(len(templated), 2)
             self.assertTrue(record.exists())  # a preflight records its pass for this directory
-            self.assertFalse((root/'outputs/worker-0/identity.json').exists())
+            self.assertTrue(submit.preflight_only(run))  # and leaves the run submittable
             templated.clear()
             with patch.object(sys, 'argv', argv):
                 r.main()
