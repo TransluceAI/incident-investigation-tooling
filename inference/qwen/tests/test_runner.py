@@ -15,6 +15,10 @@ if not runner_path.exists():
 spec = importlib.util.spec_from_file_location('inference_runner', runner_path)
 r = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(r)
+submit_spec = importlib.util.spec_from_file_location(
+    'submit', Path(__file__).resolve().parents[1] / 'scripts/submit.py')
+submit = importlib.util.module_from_spec(submit_spec)
+submit_spec.loader.exec_module(submit)
 
 
 class FakeTokenizer:
@@ -331,9 +335,10 @@ class ReasoningTests(unittest.TestCase):
             cfg.write_text(json.dumps({**self.cfg, 'model': 'Org/model'}))
             manifest.write_text(''.join(json.dumps({'unit_id': str(i), 'chunk_idx': 0,
                 'text': 'evidence', 'text_sha256': r.digest(b'evidence')})+'\n' for i in range(2)))
+            run = root/'run'  # a submit.py run directory
             argv = ['runner', '--config', str(cfg), '--input-manifest', str(manifest),
-                    '--output-dir', str(root/'outputs'), '--worker-id', '0']
-            record = root/'outputs/worker-0/validated.json'
+                    '--output-dir', str(run/'outputs'), '--worker-id', '0']
+            record = run/'outputs/worker-0/validated.json'
 
             def resume(expected, why):
                 templated.clear()
@@ -347,11 +352,12 @@ class ReasoningTests(unittest.TestCase):
             with patch.object(sys, 'argv', argv+['--validate-only']):
                 r.main()
             self.assertEqual(len(templated), 2)
-            self.assertFalse(record.exists())  # an explicit check writes no record
+            self.assertTrue(record.exists())  # a preflight records its pass for this directory
+            self.assertTrue(submit.preflight_only(run))  # and leaves the run submittable
             templated.clear()
             with patch.object(sys, 'argv', argv):
                 r.main()
-            self.assertEqual(len(templated), 4)  # first run: the full pass, then generation
+            self.assertEqual(len(templated), 2)  # first run reuses the preflight: generation only
             matching = record.read_text()
             resume(0, 'everything committed and already validated')
             with patch.object(sys, 'argv', argv+['--validate-only']):
@@ -486,6 +492,22 @@ class DecodingControlTests(unittest.TestCase):
         self.assertTrue(exhausted([1] + tokenizer.encode('x' * budget + 'Answer now.\n') + [2]))
         answer = SimpleNamespace(token_ids=tokenizer.encode('x' * 50), text='', finish_reason='length')
         self.assertFalse(r.budget_exhausted(answer, r.split_answer(answer, tokenizer, True), budget, end_ids, 1))
+
+    def test_budget_exhaustion_counts_open_reasoning_in_the_prompt(self):
+        # vLLM charges prompt tokens after an unclosed <think> to the budget,
+        # so the forced close comes that many generated tokens earlier.
+        tokenizer, budget = EndTokenizer(), 5
+        end_ids = tokenizer.encode('Answer now.\n</think>')
+
+        def exhausted(ids, prompt):
+            answer = SimpleNamespace(token_ids=ids + tokenizer.encode('{}'), text='', finish_reason='stop')
+            return r.budget_exhausted(answer, r.split_answer(answer, tokenizer, True), budget, end_ids, 1, prompt)
+
+        forced = tokenizer.encode('x' * (budget - 1) + 'Answer now.\n') + [2]
+        self.assertTrue(exhausted(forced, [20, 1, 21]))  # opener and one charged token
+        self.assertFalse(exhausted(forced, [20]))  # no open reasoning in the prompt
+        self.assertFalse(exhausted(forced, [1, 21, 2, 20]))  # prompt reasoning already closed
+        self.assertFalse(exhausted(tokenizer.encode('x' * (budget - 2) + 'Answer now.\n') + [2], [20, 1, 21]))
 
     def test_controls_example_config_is_valid(self):
         path = Path(__file__).resolve().parents[1] / 'config/qwen3.8-27b-fp8.thinking.controls.json'

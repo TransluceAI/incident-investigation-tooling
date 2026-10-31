@@ -75,13 +75,15 @@ For multiple workers, split it into nonempty, disjoint shards named `part-0.json
 `system_prompt` and `schema`; request rows carry their own messages and optional
 schema. The bundled examples extract synthetic marker values.
 
-Preflight uses the real tokenizer without loading GPU weights:
+Preflight uses the real tokenizer without loading GPU weights. Pointed at the
+run's `outputs` (worker N for shard N), it records its pass so the workers skip
+theirs, and `submit.py` still accepts the run as fresh:
 
 ```bash
 .runtime/venv/bin/python scripts/inference_runner.py \
   --config .runtime/config/qwen3.8-27b-fp8.json \
   --input-manifest examples/input.jsonl \
-  --output-dir runs/preflight --worker-id 0 --validate-only
+  --output-dir "$PWD/runs/smoke-v1/outputs" --worker-id 0 --validate-only
 
 .runtime/venv/bin/python scripts/submit.py \
   --manifest examples/input.jsonl --run-dir "$PWD/runs/smoke-v1" \
@@ -244,7 +246,9 @@ passes, `outputs/worker-*/validated.json` records the run identity and digests o
 the Python version, the installed packages and the tokenizer as loaded (class,
 options, vocabulary and chat template), and a resume with the same record skips
 that pass. A missing, unreadable or mismatched record means a full pass;
-`--validate-only` always validates and writes no record. Changed model, config, code,
+`--validate-only` always validates and records its pass in the worker directory
+unless that directory holds another run, so point a preflight's `--output-dir` at
+the run's `outputs` directory to spare the workers a second pass. Changed model, config, code,
 or input requires a new run directory. The launcher records the Python path,
 not a hash of the full runtime/model contents; those must not be modified in place.
 Directory aliases are resolved at submission so switching a release symlink does
