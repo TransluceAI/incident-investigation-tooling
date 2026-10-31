@@ -35,7 +35,8 @@ from .warnings import review_warnings
 
 # Fields reconciliation reads. Reasoning and token logprobs are dropped once
 # scored, so memory grows with the number of requests, not generation length.
-KEPT = ("unit_id", "custom_id", "request_sha256", "run_identity", "status", "error", "result")
+KEPT = ("unit_id", "custom_id", "request_sha256", "run_identity", "status", "error", "result",
+        "thinking_budget_exhausted")
 
 
 def load_outputs(dirs, engine, manifests):
@@ -144,9 +145,12 @@ def reconcile(run, output_dirs, near_miss_threshold=0.2):
                                        "segment_sources": w["segment_sources"]})
                 continue
             p_yes = base["p_yes"]
+            warnings = review_warnings(row["result"], evidence, base["confidence_semantics"])
+            if row.get("thinking_budget_exhausted"):
+                # The engine closed the reasoning mid-thought, so the answer may rest on unfinished analysis.
+                warnings = sorted(warnings + ["thinking_budget_exhausted_review"])
             ok = {**base, "validation_status": "validated", "evidence": evidence,
-                  "segment_sources": w["segment_sources"],
-                  "review_warnings": review_warnings(row["result"], evidence, base["confidence_semantics"])}
+                  "segment_sources": w["segment_sources"], "review_warnings": warnings}
             judgments.append(ok)
             by_item_axis[(w["item_id"], axis)].append(ok)
             if row["result"]["label"] == "no" and p_yes is not None and p_yes >= near_miss_threshold:

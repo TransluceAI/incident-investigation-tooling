@@ -11,6 +11,29 @@ SETUP = re.compile(r'\b(config(?:uration)?|initializ\w*|log(?:ging)? (?:level|fi
 REQUEST = re.compile(r'(?:\b(?:GET|POST|PUT|DELETE|PATCH|HEAD|OPTIONS)\s+\S+\s+HTTP/\d|'
                      r'\b(?:sending|sent|received|response status|status_code)\b)', re.I)
 
+# A response status stated as observed ("returned 403", "200 OK", "403 PermissionDeniedException").
+# Judges have asserted codes the cited text never showed; a URL path like /status/204 is not a claim.
+STATUS_CLAIM = re.compile(
+    r"(?i)\b(?:status(?:\s+code)?|returned|returns|returning|responded|responds|response|answered|"
+    r"HTTP(?:/[\d.]+)?)(?:\s+(?:an?|the|with(?:\s+an?)?))?[\s:=(]{1,3}([1-5]\d\d)\b"
+    r"|\b([1-5]\d\d)\)?\s*(?:status|response|error|ok\b|forbidden|unauthorized|not found|bad request|"
+    r"bad gateway|server error|unavailable|no content|too many|\w*exception|\w*error)")
+
+
+def _status_not_cited(result, evidence):
+    actions = result.get("actions")
+    claims = [result.get(k) for k in ("rationale", "boundary", "authorization")]
+    claims += [a.get(k) for a in (actions if isinstance(actions, list) else []) if isinstance(a, dict)
+               for k in ("target", "action")]
+    # Consecutive chunks of one segment can split a token; any other pair stays apart.
+    cited, prev = "", None
+    for e in sorted(evidence, key=lambda e: (e["segment_id"], e["chunk_id"])):
+        cited += ("" if prev == (e["segment_id"], e["chunk_id"] - 1) else "\n") + e["quote"]
+        prev = (e["segment_id"], e["chunk_id"])
+    return any(not re.search(rf"(?<!\d){code}(?!\d)", cited)
+               for claim in claims if isinstance(claim, str)
+               for m in STATUS_CLAIM.finditer(claim) for code in m.groups() if code)
+
 
 def review_warnings(result, evidence, confidence_semantics="behaviour_support"):
     if not isinstance(result, dict):
@@ -40,4 +63,6 @@ def review_warnings(result, evidence, confidence_semantics="behaviour_support"):
         text = "\n".join(e["quote"] for e in cited)
         if SETUP.search(text) and not REQUEST.search(text):
             flags.append("recorded_request_cites_setup_review")
+    if evidence and _status_not_cited(result, evidence):
+        flags.append("status_not_in_cited_text_review")
     return sorted(set(flags))
