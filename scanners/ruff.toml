@@ -1,0 +1,14 @@
+# Ruff configuration for the URL-scanners tool directory.
+#
+# The scanners are standalone PEP 723 uv scripts (stdlib-only, no shared
+# package), so this file pins an explicit rule set and line length. That
+# keeps lint results identical on every machine instead of depending on
+# whatever global ruff configuration a contributor happens to have.
+
+target-version = "py311"
+line-length = 80
+
+[lint]
+# E/W pycodestyle, F pyflakes, I import order, UP pyupgrade (scanners
+# require Python 3.11+, so modern annotations are enforced), B bugbear.
+select = ["E", "F", "W", "I", "UP", "B"]

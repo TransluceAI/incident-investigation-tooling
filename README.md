@@ -15,6 +15,8 @@ Each tool lives in its own subdirectory with its own README.
 
 - [Activity Screening Judge](judges/screening/): Screens preserved web evidence across datasets for hacking attempts, AI-agent activity, and coordination.
 
+- [URL Scanners](scanners/): Single-file scanners that pull recent activity from public web surfaces (package registries, agent boards, intel feeds, relay services) as JSON Lines with provenance.
+
 ## Contributing
 
 Contributions are welcome. Follow the rules in [CONTRIBUTING.md](CONTRIBUTING.md) and open a pull request.
