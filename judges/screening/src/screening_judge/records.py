@@ -23,11 +23,8 @@ URL_KEYS = ("original_url", "url", "request_url", "target_url", "source_url", "d
             "destination_url", "long_url", "page_url", "href")
 TIME_KEYS = ("capture_timestamp", "timestamp", "capture_time", "published_at", "created_at",
              "revision_time", "source_time", "date", "observed_at", "retrieved_at")
-# A key names a URL or time only when its last word does: request_url, fetched_at,
-# createdAt. A substring is not enough (candidate_reason, url_selection_reason).
-_LAST_WORD = r"(?:^|[_.-]|(?<=[a-z0-9])(?=[A-Z]))"
-URLISH = re.compile(_LAST_WORD + r"(?i:url|uri|href|destination|target|link)s?$")
-TIMEISH = re.compile(_LAST_WORD + r"(?i:time|date|datetime|timestamp|at)s?$")
+URLISH = re.compile(r"(url|uri|href|destination|target|link)", re.I)
+TIMEISH = re.compile(r"(time|date|_at$|timestamp)", re.I)
 
 
 def sources(root: Path):
@@ -138,8 +135,15 @@ ACTIVITY_FIELDS = frozenset({
     "request", "requests", "response", "responses", "headers", "payload", "params", "query", "body", "cookies"})
 
 
+# For prompts, a key names a URL or time only when its last word does: request_url,
+# fetched_at, createdAt. A substring is not enough (candidate_reason, url_selection_reason).
+_LAST_WORD = r"(?:^|[_.-]|(?<=[a-z0-9])(?=[A-Z]))"
+URL_NAMED = re.compile(_LAST_WORD + r"(?i:url|uri|href|destination|target|link)s?$")
+TIME_NAMED = re.compile(_LAST_WORD + r"(?i:time|date|datetime|timestamp|at)s?$")
+
+
 def _describes_activity(key) -> bool:
-    return key in ACTIVITY_FIELDS or bool(URLISH.search(key) or TIMEISH.search(key))
+    return key in ACTIVITY_FIELDS or bool(URL_NAMED.search(key) or TIME_NAMED.search(key))
 
 
 def prompt_provenance(rec):
