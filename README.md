@@ -15,6 +15,8 @@ Each tool lives in its own subdirectory with its own README.
 
 - [Activity Screening Judge](judges/screening/): Screens preserved web evidence across datasets for hacking attempts, AI-agent activity, and coordination.
 
+- [Classifier judge](judges/classifier/): One short yes/no request per screening-judge window, with a campaign-aware prompt and scripts that score it against the screening judge on labeled sets.
+
 ## Contributing
 
 Contributions are welcome. Follow the rules in [CONTRIBUTING.md](CONTRIBUTING.md) and open a pull request.

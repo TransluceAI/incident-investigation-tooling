@@ -1,0 +1,18 @@
+[project]
+name = "classifier-judge"
+version = "0.1.0"
+description = "One-request-per-window yes/no classifier over screening-judge windows"
+requires-python = ">=3.10"
+# Install judges/screening first (pip install -e ../screening); it supplies windows, controls and evaluation.
+dependencies = ["jsonschema>=4.0", "screening-judge"]
+
+[project.scripts]
+classifier-judge = "classifier_judge.cli:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["classifier_judge"]
+package-dir = {"" = "src"}
