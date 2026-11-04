@@ -22,7 +22,7 @@ classifier-judge prepare --source-run "$RUN_ROOT/screening/prepared" \
   --prompt config/recall_prompt.txt --hints
 ```
 
-[`EVALUATION.md`](EVALUATION.md) has the pre-registered tests behind this prompt and their limits. On a fresh set of 21 positives and 76 negatives it found 15/21 with 0 false alarms, against 8/21 and 0 for the v5 screening judge. On 89 later negatives that no judge had seen it raised 0 false alarms, against 6 for the untuned prompt and 0 for v5.
+[`EVALUATION.md`](EVALUATION.md) has the pre-registered tests behind this prompt and their limits. On a fresh set of 21 positives and 76 negatives it found 15/21 with 0 false alarms, against 8/21 and 0 for the v5 screening judge. On 89 later negatives that no judge saw before, it raised 0 false alarms, against 6 for the untuned prompt and 0 for v5.
 
 ## Install
 
